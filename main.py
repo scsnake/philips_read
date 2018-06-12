@@ -3,8 +3,6 @@ from pathlib import Path
 from glob import glob
 from collections import OrderedDict
 import numpy as np
-import bpy
-
 
 def get_centerlines(series_dir):
     ret = OrderedDict()
@@ -23,7 +21,7 @@ def get_centerlines(series_dir):
         except:
             continue
 
-        ret[vessel_name] = np.array(center_infos).reshape((9, -1))
+        ret[vessel_name] = np.array(center_infos).reshape((-1, 9))
 
     return ret
 
@@ -32,7 +30,8 @@ if __name__ == '__main__':
     centerlines = get_centerlines(r'D:\Users\ntuhuser\Downloads\Cad\STATE0 - 805')
     a = centerlines['LAD']
     l = []
+
     for i in range(a.shape[1]):
-        l += list(a[3:, i])
+        l+= list(a[i, 0:3])
 
     print(l)
