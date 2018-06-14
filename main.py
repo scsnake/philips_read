@@ -88,13 +88,22 @@ def get_centerlines(series_dir):
 
 def demo_oblique_mpr():
     ct = CtVolume()
-    ct.load_image_data(
-        r'D:\Users\ntuhuser\Downloads\CCTA\HALF 75% 1.04s Axial 1.0 CTA-HALF CTA Sharp Cardiac LUNG 75% - 7')
-    ViewCT(ct.data)
+    ct.load_image_data(r'./CCTA/HALF 75% 1.04s Axial 1.0 CTA-HALF CTA Sharp Cardiac LUNG 75% - 7')
+    # ViewCT(ct.data)
+    plane = oblique_MPR(ct.data, ct.spacing, np.floor(np.array(ct.data.shape)/2.0),
+                        np.array([1,1,1]), 128, (128, 128))
+    ViewCT(plane.reshape((1, 128, 128)))
+
+def demo_curved_mpr():
+    ct = CtVolume()
+    ct.load_image_data(r'./CCTA/HALF 75% 1.04s Axial 1.0 CTA-HALF CTA Sharp Cardiac LUNG 75% - 7')
+    centerlines = get_centerlines(r'./CCTA/CCA results 75% 11 TI - 1109')
+    cmpr= curved_MPR(ct, centerlines['LAD'])
+    ViewCT(cmpr)
 
 
 def demo_centerlines_data(save=False):
-    centerlines = get_centerlines(r'D:\Users\ntuhuser\Downloads\CCTA\CCA results 75% 11 TI - 1109')
+    centerlines = get_centerlines(r'./CCTA/CCA results 75% 11 TI - 1109')
     fig = plt.figure()
     ax = Axes3D(fig)
     for vessel, points in centerlines.items():
@@ -109,6 +118,21 @@ def demo_centerlines_data(save=False):
             plt.savefig('coronary%d.png' % (angle,))
             # plt.pause(.001)
 
+def curved_MPR(ctVolume, center_points):
+    points = center_points[:, 0:3]
+    ret = np.full((points.shape[0],30,30), -1024)
+    ctVolume.spacing[0] = ctVolume.spacing[0]*(-1)
+    for i in range(points.shape[0]):
+        point1 = np.array(points[i])[::-1]
+        point2 = np.array(points[i-1] if i>0 else points[1])[::-1]
+        point1 = ctVolume.absolute_to_pixel_coord(point1, True)
+        point2 = ctVolume.absolute_to_pixel_coord(point2, True)
+        normal_vec = point1 - point2
+        ret[i] = oblique_MPR(ctVolume.data, ctVolume.spacing, point1,
+                        normal_vec, 30, (30, 30))
+
+    return ret
+
 if __name__ == '__main__':
     np.set_printoptions(formatter={'float_kind': lambda x: "%.2f" % x})
-    demo_oblique_mpr()
+    demo_curved_mpr()

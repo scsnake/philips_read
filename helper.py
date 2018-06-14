@@ -381,7 +381,7 @@ class CtVolume(object):
 
     def load_dicom(self, dirname):
 
-        dcm_files = glob.glob(os.path.join(dirname, '[!_]*.dcm'))
+        dcm_files = sorted(glob.glob(os.path.join(dirname, '[!_]*.dcm')))
         if len(dcm_files) == 0:
             dcm_files = glob.glob(os.path.join(dirname, '[!_]*'))
         assert len(dcm_files) > 0
@@ -393,7 +393,7 @@ class CtVolume(object):
 
         data = np.zeros((len(dcm_files), f.Columns, f.Rows), np.int16)
         spacing = np.array([f.SliceThickness, f.PixelSpacing[1], f.PixelSpacing[0]])
-        origin = reversed(f[0x20, 0x32].value)  # image position
+        origin = np.array(f[0x20, 0x32].value)[::-1]  # image position
 
         spacing = np.dot(spacing[::-1].reshape((1, 3)),
                          np.append(np.array(f.ImageOrientationPatient), [0, 0, 1]).reshape((3, 3))).reshape(3)[::-1]
@@ -415,8 +415,11 @@ class CtVolume(object):
         '''
         return self.origin + self.spacing * np.array(coord)
 
-    def absolute_to_pixel_coord(self, coord):
-        return np.abs(np.floor((np.array(coord) - self.origin) / self.spacing + 0.5)).astype(np.uint16)
+    def absolute_to_pixel_coord(self, coord, return_float=False):
+        if not return_float:
+            return np.abs(np.floor((np.array(coord) - self.origin) / self.spacing + 0.5)).astype(np.uint16)
+        else:
+            return (np.array(coord) - self.origin) / self.spacing
 
     def apply_window(self, data=None, window=None):
         if data is None:
