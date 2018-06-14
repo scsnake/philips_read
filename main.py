@@ -9,6 +9,8 @@ import pydicom
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.ndimage import map_coordinates
 
+from helper import ViewCT, CtVolume
+
 
 def get_float_index(arr, index):
     shape = np.array(arr.shape)
@@ -59,6 +61,7 @@ def oblique_MPR(volume, spacing, point, normal_vector_plane, width, output_shape
 
     idx = coords / spacing[(slice(None),) + (None,) * (coords.ndim - 1)] + point[:, None, None]
     new_data = map_coordinates(volume, idx, order=1, mode='constant', cval=0)
+    return new_data
 
 
 def get_centerlines(series_dir):
@@ -83,40 +86,29 @@ def get_centerlines(series_dir):
     return ret
 
 
-if __name__ == '__main__':
-    np.set_printoptions(formatter={'float_kind': lambda x: "%.2f" % x})
+def demo_oblique_mpr():
+    ct = CtVolume()
+    ct.load_image_data(
+        r'D:\Users\ntuhuser\Downloads\CCTA\HALF 75% 1.04s Axial 1.0 CTA-HALF CTA Sharp Cardiac LUNG 75% - 7')
+    ViewCT(ct.data)
 
-    data = np.random.rand(10, 10, 10)
-    print(oblique_MPR(data, np.array([1, 2, 1]), np.array([5, 5, 5]), np.array([1, 0, 0]), 3, (3, 3)))
 
-    # centerlines = get_centerlines(r'C:\Users\Administrator\Downloads\Cad\STATE0 - 805')
-    centerlines = get_centerlines(r'C:\Users\Administrator\Downloads\2994481\STATE0 - 3015')
-
-    print(centerlines['LAD'][0])
-
-    # data = []
-    # data2 = []
-    # for vessel, points in centerlines.items():
-    #     data += list(points[:, 0:3])
-    # for i in range(3):
-    #     data[i]=centerlines['LAD'][i, 0:3]
-    #
-    #
-    # data2+=[list(centerlines['LAD'][0, 0:3]+centerlines['LAD'][0, 3:6])]
-    # data2+=[list(centerlines['LAD'][1, 0:3]+centerlines['LAD'][1, 3:6])]
-    # data2+=[list(centerlines['LAD'][1, 0:3]+centerlines['LAD'][1, 6:9])]
-
-    # data = np.array(data)
-    # data2 = np.array(data2)
-
+def demo_centerlines_data(save=False):
+    centerlines = get_centerlines(r'D:\Users\ntuhuser\Downloads\CCTA\CCA results 75% 11 TI - 1109')
     fig = plt.figure()
     ax = Axes3D(fig)
     for vessel, points in centerlines.items():
         data = points[:, 0:3]
         ax.scatter(data[:, 0], data[:, 1], data[:, 2], c=np.random.rand(3, ))
     # ax.scatter(data2[:, 0], data2[:, 1], data2[:, 2], color='red')
-    for angle in range(0, 360, 10):
-        ax.view_init(30, angle)
-        # plt.draw()
-        plt.savefig('coronary%d.png' % (angle,))
-        # plt.pause(.001)
+    if not save:
+        plt.show()
+    else:
+        for angle in range(0, 360, 10):
+            ax.view_init(30, angle)
+            plt.savefig('coronary%d.png' % (angle,))
+            # plt.pause(.001)
+
+if __name__ == '__main__':
+    np.set_printoptions(formatter={'float_kind': lambda x: "%.2f" % x})
+    demo_oblique_mpr()
