@@ -1,3 +1,4 @@
+import codecs
 import random
 from collections import OrderedDict
 from glob import glob
@@ -133,6 +134,34 @@ def curved_MPR(ctVolume, center_points):
 
     return ret
 
+
+def output_text(centerlines, file_name):
+    dim1 = dim2 = 0
+    for vessel, points in centerlines.items():
+        dim1 += 1
+        dim2 = max(dim2, points.shape[0])
+    ret = np.zeros((dim1, dim2 + 1), dtype=object)
+    ind = -1
+    for vessel, points in centerlines.items():
+        ind += 1
+        ret[ind, 0] = vessel
+        for i, point in enumerate(points):
+            ret[ind, i + 1] = np.array2string(point[0:3], formatter={'float_kind': lambda x: "%.4f" % x},
+                                              separator=',')[1:-1]
+    file = codecs.open(file_name, "w", "utf-8")
+    txt = np.savetxt(file, ret.T, delimiter='\t')
+    file.close()
+    return txt
+
 if __name__ == '__main__':
-    np.set_printoptions(formatter={'float_kind': lambda x: "%.2f" % x})
-    demo_curved_mpr()
+    np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
+    # demo_curved_mpr()
+    for d in Path('F:').iterdir():
+        if not d.is_dir() or d.parts[-1].startswith('.'):
+            continue
+        for subdir in d.iterdir():
+            break
+        centerlines = get_centerlines(str(subdir.resolve()))
+        chartNo = d.parts[-1]
+
+        txt = output_text(centerlines, chartNo)
