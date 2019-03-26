@@ -40,32 +40,6 @@ np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
 
 # In[3]:
 
-
-def kill_thread(thread):
-    import ctypes
-
-    id = thread.ident
-    code = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_long(id),
-        ctypes.py_object(SystemError)
-    )
-    if code == 0:
-        raise ValueError('invalid thread id')
-    elif code != 1:
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_long(id),
-            ctypes.c_long(0)
-        )
-        raise SystemError('PyThreadState_SetAsyncExc failed')
-        
-def kill_all_thread():
-    for thread in jobs.running:
-        kill_thread(thread)
-
-
-# In[4]:
-
-
 def set_axes_radius(ax, origin, radius):
     ax.set_xlim3d([origin[0] - radius, origin[0] + radius])
     ax.set_ylim3d([origin[1] - radius, origin[1] + radius])
@@ -1031,7 +1005,7 @@ class Coronary:
 
         if guess_orifice:
             self.guess_orifice()
-        
+
         if n_per_section:
             self.resample_section(n_per_section=n_per_section)
 
@@ -1121,27 +1095,32 @@ class Coronary:
 
     def guess_orifice(self):
         oct_distance = [np.mean(list(map(np.linalg.norm, oct_p-cen_p))) for (oct_p, cen_p)
-                        in zip(self.inner_wall_abs_coords, self.center_points[:,0])]
+                        in zip(self.inner_wall_abs_coords, self.center_points[:, 0])]
 #         print(np.mean(oct_distance))
-        us = UnivariateSpline(range(50,len(oct_distance)), oct_distance[50:], s=len(oct_distance)/10)
+        us = UnivariateSpline(range(50, len(oct_distance)),
+                              oct_distance[50:], s=len(oct_distance)/10)
         for i, v in enumerate(oct_distance):
-            if v - us(i)<0.4:
+            if v - us(i) < 0.4:
                 break
-        i = max(0,i-2)
+        i = max(0, i-2)
         self.inner_wall_abs_coords = self.inner_wall_abs_coords[i:]
         self.inner_wall_rel_coords = self.inner_wall_rel_coords[i:]
-        self.center_points = self.center_points[i:,...]
-    
-    def plot(self, s=0, e=None, step=1):
+        self.center_points = self.center_points[i:, ...]
+
+    def plot(self, s=0, e=None, step=1, wall_points=None):
         if e is None:
             e = self.center_points.shape[0]
-        
-        fig = plt.figure(figsize=(8,8))
+
+        fig = plt.figure(figsize=(8, 8))
         ax = Axes3D(fig)
-        for p in self.center_points[s:e:step,0,:]:
-            ax.plot(*(p.reshape(-1,3).T), 'ok', alpha=0.7)
+        for p in self.center_points[s:e:step, 0, :]:
+            ax.plot(*(p.reshape(-1, 3).T), 'ok', alpha=0.7)
+        if wall_points:
+            linspace = np.linspace(0,1, wall_points+1)[:-1]
+            for spl in self.section_spl[s:e:step]:
+                ax.plot(*(spl.spline(linspace)).T, '.r', alpha=0.2)
         for ps in self.inner_wall_abs_coords[s:e:step]:
-            ax.plot(*np.array(ps).T, '.r', alpha=0.2)
+                ax.plot(*np.array(ps).T, 'ob', alpha=0.2)
         plt.show()
 
 
@@ -1223,10 +1202,13 @@ class BSpline3D:
 
     def init_spline(self, data, s=0, k=3, per=False):
         if per:
-            tck, u = interpolate.splprep(
-                np.append(data, [data[0]], axis=0).T, s=s, nest=-1, k=k, per=per)
+#             tck, u = interpolate.splprep(
+#                 np.append(data, [data[0]], axis=0).T, s=s, nest=-1, k=k, per=per, 
+#                 u=np.linspace(0,1+1/data.shape[0],data.shape[0]+1))
+            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, 
+                u=np.linspace(0,1,data.shape[0]), quiet=1)
         else:
-            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per)
+            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, u=np.linspace(0,1, data.shape[0]), quiet=1)
         spline = interpolate.BSpline(
             np.array(tck[0]),
             np.array(tck[1]).T, tck[2])
@@ -1435,6 +1417,7 @@ class BSpline3D:
         set_axes_equal(ax)
         plt.show()
 
+
 def test_cubic_spline():
     centerlines = get_centerlines(
         r'C:\Users\Administrator\Downloads\CCTA\CCA results 75% 11 TI - 1109')
@@ -1529,10 +1512,9 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
     output_dim = nparr(output_dim, 2)
     new_dim = output_dim * precision
     cor = coronary
-    
-    
+
     _t = time()
-    
+
     cmpr, pixel_spacing = curved_MPR(
         ctVolume, cor.center_points, output_dim=output_dim, output_spacing=output_spacing)
 #     ret = np.empty((cor.center_points.shape[0], new_dim[0], new_dim[1]))
@@ -1556,7 +1538,7 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
 
     results = []
     result_coord = []
-    
+
     print('straighten: {}'.format(time()-_t))
     _t = time()
     with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
@@ -1571,7 +1553,7 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
 
         for fs in concurrent.futures.as_completed(results):
             result_coord.append(fs.result())
-    
+
     print(time()-_t)
     _t = time()
     ret = output_mask((cor.center_points.shape[0], output_dim[0], output_dim[1]), np.insert(
@@ -1819,10 +1801,10 @@ def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None):
 #     all_coord = np.floor(np.array(all_coord) + 0.5).astype(np.int)
 #     ret[tuple(all_coord.T)] = 1
 
-    
+
 #     ret = sparse.COO(result_coord.T, data=1, shape=shape1)
-    
-    
+
+
 #     props = regionprops(label(ret, background=-1, connectivity=2))
 #     for prop in props[1:]:
 #         if ret[tuple(prop.coords[0,:])]==1:
@@ -1840,17 +1822,17 @@ def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None):
 #         if prec != 1:
 #             ret = groupedAvg(ret, prec, axis=i)
 #     ret = convolve(ret, np.ones(precision)/np.prod(precision))
-    
+
     ret = output_mask(shape0, precision, result_coord, _t)
-    
-    
+
     if out is None:
         return ret
     else:
         out = ret
-        
+
+
 def output_mask(original_shape, precision, result_coord, _t=None):
-    
+
     if 0:
         shape1 = original_shape * precision
         base = np.array([shape1[1]*shape1[2], shape1[2], 1])
@@ -1871,29 +1853,29 @@ def output_mask(original_shape, precision, result_coord, _t=None):
         ret = np.zeros(shape1)
         for coord in result_coord:
             coord = np.floor(np.array(coord) + 0.5).astype(np.int)
-            ret[tuple(coord.T)]=1
-        
+            ret[tuple(coord.T)] = 1
+
 #     print(zs.min(), zs.max())
 #     print(ys.min(), ys.max())
 #     print(xs.min(), xs.max())
-    
+
     if _t:
         print(time()-_t)
-        _t=time()
-        
+        _t = time()
+
     if 0:
         ret = np.zeros(original_shape, dtype=np.float64)
         val = 1.0/np.prod(precision)
         for a, b, c in zip(zs, ys, xs):
-            coord = np.floor(np.array([a,b,c]) / precision).astype(np.int)
+            coord = np.floor(np.array([a, b, c]) / precision).astype(np.int)
             ret[tuple(coord)] += val
     else:
-        ret = ret.reshape((original_shape[0], precision[0], 
-                         original_shape[1], precision[1], 
-                         original_shape[2], precision[2])).mean(axis=(1,3,5))
-        
+        ret = ret.reshape((original_shape[0], precision[0],
+                           original_shape[1], precision[1],
+                           original_shape[2], precision[2])).mean(axis=(1, 3, 5))
+
     ret = np.clip(ret, 0, 1)
-    
+
     if _t:
         print(time()-_t)
     return ret
@@ -1903,18 +1885,20 @@ def output_mask(original_shape, precision, result_coord, _t=None):
 
 
 def generate_mask_set(point_coor, all_coord, ctInfo, precision, shape1):
-        #         all_points.append(point_coor)
-        #         return
-        float_ind = (point_coor-ctInfo['origin'])/ctInfo['spacing']
-        float_ind = float_ind * precision
+    #         all_points.append(point_coor)
+    #         return
+    float_ind = (point_coor-ctInfo['origin'])/ctInfo['spacing']
+    float_ind = float_ind * precision
 
 #         float_ind = np.floor(float_ind + 0.5).astype(np.int)
-        float_ind = np.clip(float_ind, -0.5, shape1-0.500001)
-        all_coord.append(float_ind)
+    float_ind = np.clip(float_ind, -0.5, shape1-0.500001)
+    all_coord.append(float_ind)
+
+
 def generate_mask_sub3(ctInfo, center_point, section_points0, precision, shape1, min_sp, i):
     _t = time()
-    all_coord=[]
-    
+    all_coord = []
+
     generate_mask_set(center_point, all_coord, ctInfo, precision, shape1)
     spl = BSpline3D(section_points0, simple_init=True)
     n2 = np.ceil(
@@ -1937,63 +1921,67 @@ def generate_mask_sub3(ctInfo, center_point, section_points0, precision, shape1,
     section_points = spl.spline(n2_linspace)
     for p in section_points:
         for j in range(n3):
-#             set_mask(((n3 - j) * p + j * center_point) / n3)
-            generate_mask_set(((n3 - j) * p + j * center_point) / n3, all_coord, ctInfo, precision, shape1)
+            #             set_mask(((n3 - j) * p + j * center_point) / n3)
+            generate_mask_set(((n3 - j) * p + j * center_point) /
+                              n3, all_coord, ctInfo, precision, shape1)
 #     print(i, time()-_t)
     return all_coord
-    
+
+
 def generate_mask_sub(ctInfo, center_points, section_spl, section_u0, precision, shape1, min_sp, __i, more_sampling=False):
     _t = time()
-    all_coord=[]
-    
-    n=int(center_points.shape[0]/10)
-    
-    for i, ((p0, p1), (spl0, spl1), (u0,u1)) in enumerate(zip(
+    all_coord = []
+
+    n = int(center_points.shape[0]/10)
+
+    for i, ((p0, p1), (spl0, spl1), (u0, u1)) in enumerate(zip(
             pairwise(center_points),
-            pairwise(section_spl), 
+            pairwise(section_spl),
             pairwise(section_u0))):
         n1 = np.ceil(3 * np.linalg.norm(p0 - p1) / min_sp).astype(np.int)
-        n1 = max(n1,2)
+        n1 = max(n1, 2)
         n2 = np.ceil(
             3 * 1000 /
             min_sp * np.linalg.norm(spl0.spline(0) - spl0.spline(1 / 1000))
         ).astype(np.int)
         if more_sampling:
             n1 *= 2
-            n2 = max(n2*2,2)
+            n2 = max(n2*2, 2)
             n3 = np.ceil(n2 / np.pi / 2).astype(np.int)
-            n3 = max(n3,1)
+            n3 = max(n3, 1)
 
         else:
-            n2 = max(n2,2)
+            n2 = max(n2, 2)
             n3 = np.ceil(n2 / np.pi / 2).astype(np.int)
-            n3 = max(n3,1)
-            
-        n2_linspace = np.linspace(0, 1 - 1 / n2, n2)  
-        next_section_points = spl1.spline(np.mod(n2_linspace+u1,1.0))
-        
+            n3 = max(n3, 1)
+
+        n2_linspace = np.linspace(0, 1 - 1 / n2, n2)
+        next_section_points = spl1.spline(np.mod(n2_linspace+u1, 1.0))
+
         break
     results = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=32 if more_sampling else 1) as executor:
-        for i, ((p0, p1), (spl0, spl1), (u0,u1)) in enumerate(zip(
+        for i, ((p0, p1), (spl0, spl1), (u0, u1)) in enumerate(zip(
                 pairwise(center_points),
-                pairwise(section_spl), 
+                pairwise(section_spl),
                 pairwise(section_u0))):
 
             this_section_points = next_section_points
-            next_section_points = spl1.spline(np.mod(n2_linspace+u1,1.0))
+            next_section_points = spl1.spline(np.mod(n2_linspace+u1, 1.0))
             for i in range(n1):
                 section_points = (
                     (n1 - i) * this_section_points + i * next_section_points) / n1
                 center_point = ((n1 - i) * p0 + i * p1) / n1
     #             set_mask(center_point)
-                
-                results.append(executor.submit(generate_mask_sub2,center_point, section_points,n3, ctInfo, precision, shape1))
-        
+
+                results.append(executor.submit(
+                    generate_mask_sub2, center_point, section_points, n3, ctInfo, precision, shape1))
+
         for fs in concurrent.futures.as_completed(results):
             all_coord += fs.result()
 #     print(__i, time()-_t)
     return all_coord
+
 
 def generate_mask_sub2(center_point, section_points, n3, ctInfo, precision, shape1):
     all_coord = []
@@ -2002,9 +1990,10 @@ def generate_mask_sub2(center_point, section_points, n3, ctInfo, precision, shap
         #                 set_mask(p,ret)
         for j in range(n3):
             #                     pass
-#                     set_mask(((n3 - j) * p + j * center_point) / n3)
-            generate_mask_set(((n3 - j) * p + j * center_point) / n3, all_coord, ctInfo, precision, shape1)
-    
+            #                     set_mask(((n3 - j) * p + j * center_point) / n3)
+            generate_mask_set(((n3 - j) * p + j * center_point) /
+                              n3, all_coord, ctInfo, precision, shape1)
+
     return all_coord
 
 
@@ -2028,12 +2017,11 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
         res_data = result
     path1 = save_dir.joinpath(vessel_name+'_mask.npy')
     path2 = save_dir.joinpath(vessel_name+'_straighten_mask.npy')
-    path3 = save_dir.joinpath(vessel_name+'_straighten.npy')    
+    path3 = save_dir.joinpath(vessel_name+'_straighten.npy')
     if path1.exists() and path2.exists() and path3.exists():
         print('bypass '+vessel_name)
         return
-    
-        
+
     for vessel_name, res in res_data.items():
         if not 'inner_wall' in res:
             continue
@@ -2045,7 +2033,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
         else:
             if path1.exists():
                 os.remove(str(path1.resolve()))
-        
+
             np.save(str(path1.resolve()), mask)
 
         s_mask, s_mpr = straighten_data_mask(
@@ -2055,7 +2043,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
         else:
             if path2.exists():
                 os.remove(str(path2.resolve()))
-        
+
             np.save(str(path2.resolve()), s_mask)
 
         if np.isnan(s_mpr).any():
@@ -2063,7 +2051,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
         else:
             if path3.exists():
                 os.remove(str(path3.resolve()))
-        
+
             np.save(str(path3.resolve()), s_mpr)
 
         print('{} saved!'.format(vessel_name))
@@ -2159,12 +2147,12 @@ def save_all():
         ct.load_image_data(ct_dir + '/')
 
         result = parse_results(res_dir + '/')
-        
-        res= [(k if 'inner_wall' in v else '_'+k) for k,v in result.items()]
+
+        res = [(k if 'inner_wall' in v else '_'+k) for k, v in result.items()]
         print(ct_dir)
         print(ct.id)
         print(res)
-        
+
         # In[185]:
 
 #         save_mask(ct, result, save_dir='/data/scsnake/ccta/_'+ct.id)
@@ -2176,30 +2164,29 @@ def save_all():
 
 # %%pixie_debugger
 def verify_npy(i):
-    d = sorted(list(x for x in Path(r'/data/scsnake/ccta/').glob(r'S*_1.2*/') if x.is_dir()))[i]
+    d = sorted(list(x for x in Path(
+        r'/data/scsnake/ccta/').glob(r'S*_1.2*/') if x.is_dir()))[i]
     files = sorted(list(d.glob(r'*.npy')))
-    print(np.array(list(map(str,files))))
-    fig, ax = plt.subplots(len(files),1, figsize=(8, 8*len(files)))
-    
-    if len(files)==1:
+    print(np.array(list(map(str, files))))
+    fig, ax = plt.subplots(len(files), 1, figsize=(8, 8*len(files)))
+
+    if len(files) == 1:
         ax = np.array([ax])
-    
+
     for f, x in zip(files, ax.ravel()):
         path = str(f)
         npy = np.load(path)
         if '_straighten_mask' in path:
-            npy = npy[:, np.floor(npy.shape[1]/2).astype(np.int),:]
+            npy = npy[:, np.floor(npy.shape[1]/2).astype(np.int), :]
         elif '_straighten' in path:
-            npy = npy[:, np.floor(npy.shape[1]/2).astype(np.int),:]
+            npy = npy[:, np.floor(npy.shape[1]/2).astype(np.int), :]
         elif '_mask' in path:
             npy = np.max(npy, axis=0)
-    
+
         x.imshow(npy, cmap='gray')
         x.set_title(f.name)
-        
-    
+
     plt.tight_layout()
     plt.show()
-    
-# verify_npy(2)
 
+# verify_npy(2)
