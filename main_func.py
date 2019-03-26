@@ -1202,17 +1202,18 @@ class BSpline3D:
 
     def init_spline(self, data, s=0, k=3, per=False):
         if per:
-#             tck, u = interpolate.splprep(
-#                 np.append(data, [data[0]], axis=0).T, s=s, nest=-1, k=k, per=per, 
-#                 u=np.linspace(0,1+1/data.shape[0],data.shape[0]+1))
-            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, 
-                u=np.linspace(0,1,data.shape[0]), quiet=1)
+            tck, u = interpolate.splprep(
+                np.append(data, [data[0]], axis=0).T, s=s, nest=-1, k=k, per=per, 
+                u=np.linspace(0,1,data.shape[0]+1))
+#             tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, 
+#                 u=np.linspace(0,1,data.shape[0]), quiet=1)
         else:
             tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, u=np.linspace(0,1, data.shape[0]), quiet=1)
         spline = interpolate.BSpline(
             np.array(tck[0]),
             np.array(tck[1]).T, tck[2])
         return spline, tck, u
+
 
 #     def distances_var(self, t, a, b):
 #         atb = np.concatenate(([a], t, [b]))   # added endpoints
