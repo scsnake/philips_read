@@ -17,6 +17,7 @@ import pydicom as dicom
 import skimage as sk
 from scipy.misc import imsave
 from scipy.ndimage import zoom, interpolation, filters
+import pickle
 
 
 def circle_levelset(shape, center, sqradius, scalerow=1.0):
@@ -186,41 +187,96 @@ def nodule_segmentation(CtVolume, nodule_coord):
 
 
 class IndexTracker(object):
-    def __init__(self, ax, X):
+    def __init__(self, ax, X, window, **kwargs):
+#         ax.set_title('use scroll wheel to navigate images')
+        
+        if type(X) is not tuple:
+            X = (X, )
+            
+        try:
+            ax = ax.ravel()
+        except:
+            ax = (ax, )
+                
         self.ax = ax
-        ax.set_title('use scroll wheel to navigate images')
-
         self.X = X
-        self.slices, rows, cols = X.shape
-        self.ind = self.slices // 2
-
-        self.im = ax.imshow(self.X[self.ind, :, :], cmap='gray', interpolation='spline16')
+        self.slices = np.array([im.shape[0] for im in X])
+        self.ind = np.floor(self.slices / 2).astype(np.int)
+        
+        
+        if 'cmap' not in kwargs:
+            kwargs['cmap']='gray'
+        if 'interpolation' not in kwargs:
+            kwargs['interpolation'] = 'lanczos'
+#         if 'aspect' not in kwargs:
+#             kwargs['aspect'] = 'auto'
+            
+        self.im = []
+        
+        if window is None or (len(window)==1 and type(window[0]) is not tuple):
+            self.window = np.repeat(window, len(X))
+        elif len(window)==2 and type(window[0]) is not tuple:
+            self.window = [window]
+        else:
+            self.window = window
+        
+        for i, axx in enumerate(ax):
+            w = self.window[i]
+            if w is not None:
+                self.im.append(axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0]-w[1]/2, vmax=w[0]+w[1]/2, **kwargs))
+            elif np.amin(self.X[i])<0:
+                w = self.window[i] = (-600,1500) # lung window
+                self.im.append(axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0]-w[1]/2, vmax=w[0]+w[1]/2, **kwargs))
+            else:
+                self.im.append(axx.imshow(self.X[i][self.ind[i], ...], **kwargs))
+        
+        self.last_scroll=time.time()
         self.update()
 
     def onscroll(self, event):
+        this_time = time.time()
+        if this_time - self.last_scroll < 0.1:
+            return 
         print("%s %s" % (event.button, event.step))
         if event.button == 'up':
-            self.ind = (self.ind + 1) % self.slices
+            self.ind = np.mod((self.ind + 1), self.slices).astype(np.int)
         else:
-            self.ind = (self.ind - 1) % self.slices
+            self.ind = np.mod((self.ind - 1), self.slices).astype(np.int)
+        self.last_scroll = this_time
         self.update()
 
     def update(self):
-        self.im.set_data(self.X[self.ind, :, :])
-        ax.set_ylabel('slice %s' % self.ind)
-        self.im.axes.figure.canvas.draw()
+        for i, im in enumerate(self.im):
+            im.set_data(self.X[i][self.ind[i], ...])
+            self.ax[i].set_title('slice %s' % self.ind[i])
+        for im in (self.im):
+            im.axes.figure.canvas.draw()
 
 
-def ViewCT(arr):
+def ViewCT(arr, figsize=(8,8), window=None, subplots=None, **kwargs):
     global ax, fig, tracker
-    fig, ax = plt.subplots(1, 1)
+    
+    if subplots is None:
+        if type(arr) is tuple:
+            subplots = (len(arr), 1)
+            arr = tuple(arr)
+        elif arr.ndim==4:
+            subplots = (arr.shape[0], 1)
+        elif arr.ndim==5:
+            subplots = arr.shape[0:2]
+        else:
+            subplots = (1,1)
+            
+    
+    fig, ax = plt.subplots(subplots[0], subplots[1], figsize = figsize)
+    
+#     if not type(arr).__module__ == np.__name__:
+#         arr = arr.apply_window()
 
-    if not type(arr).__module__ == np.__name__:
-        arr = arr.apply_window()
-
-    tracker = IndexTracker(ax, arr)
+    tracker = IndexTracker(ax, arr, window=window, **kwargs)
 
     fig.canvas.mpl_connect('scroll_event', tracker.onscroll)
+#     fig.canvas.mpl_connect('button_press_event', tracker.onkeypress)
     plt.show()
 
 
@@ -257,13 +313,14 @@ class CtVolume(object):
         if filename.endswith('.mhd') or filename.endswith('.mha'):
             try:
                 self.data, self.origin, self.spacing = self.load_itk(filename)
-            except:
-                pass
+            except Exception as e:
+                print(e)
+
         else:
             try:
                 self.data, self.origin, self.spacing = self.load_dicom(filename)
-            except:
-                pass
+            except Exception as e:
+                print(e)
 
     def nodule_in_VOI(self, volume):
         shape, origin, spacing = volume.data.shape, volume.origin, volume.spacing
@@ -381,30 +438,61 @@ class CtVolume(object):
 
     def load_dicom(self, dirname):
 
-        dcm_files = sorted(glob.glob(os.path.join(dirname, '[!_]*.dcm')))
+        dcm_files = (glob.glob(os.path.join(dirname, '[!_]*.dcm')))
         if len(dcm_files) == 0:
-            dcm_files = glob.glob(os.path.join(dirname, '[!_]*'))
+            dcm_files = (glob.glob(os.path.join(dirname, '[!_]*')))
         assert len(dcm_files) > 0
-        self.id = os.path.basename(dirname)
-        f = dicom.read_file(dcm_files[0])
-
-        s, i = f.RescaleSlope * 1.0, f.RescaleIntercept
+#         self.id = os.path.basename(dirname)
+        
+        f = dicom.read_file(dcm_files[0], stop_before_pixels=True)
+        
+        
+        self.id = f.SeriesInstanceUID
+        try:
+            rescale_s, rescale_i = f.RescaleSlope * 1.0, f.RescaleIntercept
+        except:
+            rescale_s, rescale_i = 1.0, 0.0
         # p = f.pixel_array
 
         data = np.zeros((len(dcm_files), f.Columns, f.Rows), np.int16)
         spacing = np.array([f.SliceThickness, f.PixelSpacing[1], f.PixelSpacing[0]])
-        origin = np.array(f[0x20, 0x32].value)[::-1]  # image position
+        
 
         spacing = np.dot(spacing[::-1].reshape((1, 3)),
                          np.append(np.array(f.ImageOrientationPatient), [0, 0, 1]).reshape((3, 3))).reshape(3)[::-1]
-
-        for ind, path in enumerate(dcm_files):
+        
+        if f[0x18, 0x5100][0:2]=='FF': # image position == feet first
+            spacing[0] = -spacing[0]
+        
+        tmp = {}
+        origins = {}
+        all_inst_no =[]
+        for path in dcm_files:
             f = dicom.read_file(path)
-
+            
             p = f.pixel_array
-            data[ind] = np.array(p)
-
-        return (data * s + i).astype(np.int16), origin, spacing
+            inst_no = int(f.InstanceNumber)
+            all_inst_no.append(inst_no)
+#             data[inst_no - 1] = np.array(p)
+            tmp[inst_no] = np.array(p)
+            origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]   # image position
+        
+        for i, inst_no in enumerate(sorted(all_inst_no)):
+            data[i,...] = tmp[inst_no]
+        
+            if i==0:
+                origin = origins[inst_no]
+        
+        del tmp
+        
+        data = data.astype(np.float64)
+        if rescale_s!=1:
+            data*=rescale_s
+        if rescale_i!=0:
+            data+=rescale_i
+        data = np.maximum(data, -2000, data)
+        
+        return data.astype(np.int16), origin, spacing
 
         # self.gray = self.apply_window(self.data)
 
@@ -491,6 +579,113 @@ class CtVolume(object):
             mhd.SetSpacing(self.spacing)
 
             sitk.WriteImage(mhd, mask_path)
+
+    def thick_recon(self, volume=None, center_pixel_coord=None, input_shape=(64, 64, 64)
+                    , recon_thickness=(5, 3, 3), recon_slices=None, swap_axis=True):
+        '''
+        :param data: data of CT volume
+        :param center_pixel_coord: centerl pixel coordinate to crop
+        :param input_shape: shape of crop
+        :param recon_thickness: reconstruction thickness (mm) in axial, coronal, sagittal
+        :return:
+        '''
+        if volume is None:
+            volume = self
+        data, spacing = volume.data, volume.spacing
+        if type(input_shape) is int:
+            input_shape = (input_shape,) * 3
+        if not hasattr(recon_thickness, '__iter__'):
+            recon_thickness = (recon_thickness,) * 3
+        if type(recon_slices) is int:
+            recon_slices = (recon_slices,) * 3
+        recon_thickness = np.array(recon_thickness, dtype=np.float32)
+        if recon_slices is not None:
+            recon_slices = np.array(recon_slices, dtype=np.int)
+        if center_pixel_coord is None:
+            center_pixel_coord = [random.randint(input_shape[i], data.shape[i] - 1 - input_shape[i])
+                                  for i in range(3)]
+
+        crop = self.crop(volume, center_pixel_coord, input_shape, -1024)
+
+        if recon_slices is None:
+            recon_thickness_n = np.divide(recon_thickness, spacing)
+        else:
+            recon_thickness_n = recon_slices
+
+        ret = []
+        for i in range(3):
+            plane = groupedAvg(crop.data, recon_thickness_n[i], i)
+            if swap_axis and i > 0:
+                plane = np.swapaxes(plane, 0, i)
+            # vol = CtVolume()
+            # vol.data = plane
+            # vol.
+            ret.append(plane)
+        ret.append(crop.data)
+        return tuple(ret)
+
+
+def groupedAvg(arr, N=2, axis=0):
+    ndim = arr.ndim
+    axes = np.arange(1,2*ndim,2)
+    new_shape = np.array((arr.shape, np.ones(ndim))).T.ravel().astype(np.int)
+
+    for i,n in zip(axis,N):
+        if n!=1:
+            new_shape[i*2] //= n
+            new_shape[i*2+1] = n
+            
+    return arr.reshape(tuple(new_shape)).mean(axis=tuple(axes))
+    
+    ## https://stackoverflow.com/questions/30379311/fast-way-to-take-average-of-every-n-rows-in-a-npy-array
+    if type(N) is int or np.mod(N, 1) == 0:
+        N = int(N)
+        slc = [slice(None)] * len(arr.shape)
+        slc[axis]=slice(N-1, None, N)
+
+        slc1 = [slice(None)] * len(arr.shape)
+        slc1[axis] = slice(1, None, None)
+
+        slc2 = [slice(None)] * len(arr.shape)
+        slc2[axis] = slice(None, -1, None)
+
+        result = np.cumsum(arr, axis)[tuple(slc)] / float(N)
+        result[tuple(slc1)] = result[tuple(slc1)] - result[tuple(slc2)]
+        return result
+    else:
+        parts = int(arr.shape[axis] / N)
+        new_shape = np.array(arr.shape)
+        new_shape[axis] = parts
+        ret = np.zeros(new_shape)
+
+        for i in range(parts):
+            start = N * i
+            end = N * (i + 1)
+            start_ind = int(np.ceil(start))
+            end_ind = int(np.floor(end))
+            start_frac = start_ind - start
+            end_frac = end - end_ind
+
+            slc = [slice(None)] * len(arr.shape)
+            slc[axis] = slice(start_ind, end_ind)
+
+            slc1 = [slice(None)] * len(arr.shape)
+            slc1[axis] = start_ind - 1
+
+            slc2 = [slice(None)] * len(arr.shape)
+            slc2[axis] = end_ind
+
+            slc0 = [slice(None)] * len(arr.shape)
+            slc0[axis] = i
+
+            if start_ind != end_ind:
+                ret[slc0] = np.sum(arr[slc], axis)
+            if start_frac > 0:
+                ret[slc0] += start_frac * arr[slc1]
+            if end_frac > 0:
+                ret[slc0] += end_frac * arr[slc2]
+
+        return ret / N
 
 
 class Nodule(CtVolume):
@@ -982,7 +1177,20 @@ dataset_csv = ''  # id,x,y,z in each line of csv
 dataset_coord_type = 'absolute'  # absolute or pixel
 output_dim = (64, 64, 64)
 
+
+def test():
+    d = CtVolume()
+    d.load_image_data(r'/data/LKDS/allset/LKDS-00024.mhd')
+    # pickle.dump(d, open('LKDS-00024-lung', 'wb'), pickle.HIGHEST_PROTOCOL)
+    # d = pickle.load(open('LKDS-00024-lung'))
+    ax, cor, sag = d.thick_recon()
+    # ViewCT(ax)
+    ViewCT(cor)
+    ViewCT(sag)
+
+
 if __name__ == '__main__':
+    test()
     # nodule_files = glob.glob(os.path.join(r'/home/scsnake/Downloads/LSTK/', '*_outputROI.mhd'))
     # for nd in nodule_files:
     #     nd_name = os.path.basename(nd)
@@ -1002,15 +1210,15 @@ if __name__ == '__main__':
     #         print(s2)
 
     # reset()
-    start_time = time.time()
-    data_prepare(r'/data/LKDS/allset/',
-                 r'/data/LKDS/csv/annotations_all.csv',
-                 r'/home/scsnake/Downloads/LSTK/',
-                 r'./no_lung/',
-                 r'./lung_no_nodule/',
-                 r'./lung_nodule/',
-                 100, 100, 100)
-    print(time.time() - start_time)
+    # start_time = time.time()
+    # data_prepare(r'/data/LKDS/allset/',
+    #              r'/data/LKDS/csv/annotations_all.csv',
+    #              r'/home/scsnake/Downloads/LSTK/',
+    #              r'./no_lung/',
+    #              r'./lung_no_nodule/',
+    #              r'./lung_nodule/',
+    #              100, 100, 100)
+    # print(time.time() - start_time)
     # d = CtVolume()
 
     # d.load_image_data(r'/data/LKDS/allset/LKDS-00024.mhd')
