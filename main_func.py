@@ -1,16 +1,19 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[3]:
+# In[1]:
 
-
+from numba import jit, njit
 from time import time
 from helper import ViewCT, CtVolume, groupedAvg
 from scipy.ndimage.morphology import binary_fill_holes
 from scipy.ndimage import map_coordinates, convolve
+from scipy.sparse import coo_matrix
+from scipy.optimize import fsolve
+import cv2
 # from skimage.measure import regionprops, label
 from scipy import interpolate, optimize
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import UnivariateSpline, PPoly, CubicSpline
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from mpl_toolkits.mplot3d import Axes3D
 import os
@@ -24,21 +27,45 @@ import concurrent.futures
 from pathlib import Path
 from itertools import tee, chain
 from functools import reduce
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 import random
 import struct
 # import sparse
 # from nbmultitask import ProcessWithLogAndControls
-
-# from numba import jit, njit
-
 
 # from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
 np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
 
 
-# In[3]:
+# In[ ]:
+
+
+def kill_thread(thread):
+    import ctypes
+
+    id = thread.ident
+    code = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_long(id),
+        ctypes.py_object(SystemError)
+    )
+    if code == 0:
+        raise ValueError('invalid thread id')
+    elif code != 1:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(id),
+            ctypes.c_long(0)
+        )
+        raise SystemError('PyThreadState_SetAsyncExc failed')
+
+
+def kill_all_thread():
+    for thread in jobs.running:
+        kill_thread(thread)
+
+
+# In[ ]:
+
 
 def set_axes_radius(ax, origin, radius):
     ax.set_xlim3d([origin[0] - radius, origin[0] + radius])
@@ -66,7 +93,7 @@ def set_axes_equal(ax):
     set_axes_radius(ax, origin, radius)
 
 
-# In[5]:
+# In[ ]:
 
 
 def pairwise(iterable):
@@ -237,7 +264,7 @@ def angle_between(v1, v2):
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
 
 
-# In[6]:
+# In[ ]:
 
 
 def get_centerlines(series_dir):
@@ -277,6 +304,8 @@ def parse_results(series_dir_or_file):
 
     if Path(series_dir_or_file).is_dir():
         files = sorted(Path(series_dir_or_file).glob('*.dcm'))
+        if len(files)==0:
+            files = sorted(Path(series_dir_or_file).glob('*'))
     elif Path(series_dir_or_file).exists():
         files = [series_dir_or_file]
     else:
@@ -284,8 +313,9 @@ def parse_results(series_dir_or_file):
 
     for i, file in enumerate(files):
 
-        f = pydicom.read_file(str(file))
+        
         try:
+            f = pydicom.read_file(str(file))
             vessel_name = f[0x00E11040].value
 
         except:
@@ -326,6 +356,18 @@ def parse_results(series_dir_or_file):
 #                 f[0x07A11013].value).reshape((-1, 8, 3))
 #         except:
 #             pass
+        
+        try:  # outer wall point count
+            v = f[0x01F51019].value
+            ret[vessel_name]['outer_wall_point_count'] = np.array(v)
+        except:
+            pass
+        try:  # outer wall, relative to center points
+            v = f[0x01F51020].value
+            ret[vessel_name]['outer_wall'] = np.array(
+                struct.unpack("f"*(len(v)//4), v)).reshape(-1, 2)
+        except:
+            pass
 
 
 #         ret[vessel_name] = {'wall_infos': np.array(wall_infos),
@@ -467,7 +509,7 @@ def plot_points_plane(points_plane):
     plt.show()
 
 
-# In[7]:
+# In[ ]:
 
 
 # %%pixie_debugger
@@ -500,7 +542,7 @@ def demo_oblique_mpr_concept():
     plt.show()
 
 
-# In[8]:
+# In[ ]:
 
 
 def oblique_MPR(volume,
@@ -602,7 +644,7 @@ def oblique_MPR(volume,
         return idx, u, v
     else:
         new_data = map_coordinates(
-            volume, np.abs(idx), order=1, mode='constant', cval=padding)
+            volume, idx, order=1, mode='constant', cval=padding)
         return new_data, u, v
 
 
@@ -708,7 +750,7 @@ def oblique_MPR_2(volume,
         return new_data, u, v
 
 
-# In[27]:
+# In[ ]:
 
 
 def curved_MPR_concept(ctVolume,
@@ -737,27 +779,30 @@ def curved_MPR_concept(ctVolume,
     return ret
 
 
-def curved_MPR(ctVolume, center_points, show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None):
-    center_points_ = center_points
-
+def curved_MPR(ctVolume, coronary, show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None, upsample_z=1):
     data, spacing = ctVolume.data, ctVolume.spacing
     output_dim = nparr(output_dim, 2)
 
     center_points_diff = np.mean(
-        list(map(np.linalg.norm, np.diff(center_points_[:, 0:3], axis=0))))
-
-    ret = np.empty((center_points_.shape[0], output_dim[0], output_dim[1]))
+        list(map(np.linalg.norm, np.diff(coronary.center_points[:, 0], axis=0))))
+    
+    point_count = coronary.center_line.u.shape[0]
+        
+    ret = np.empty((point_count + (point_count-1)*(upsample_z-1), output_dim[0], output_dim[1]))
 
     min_value = np.amin(ctVolume.data)
 
     if output_spacing is None:
         output_spacing = center_points_diff
-
-    for i, center_point in enumerate(center_points_):
-        center_coord = center_point[0]
-        center_tangent = center_point[1]
-        center_ortho = center_point[2]
-
+    output_z_spacing = center_points_diff / upsample_z
+    
+    vessel_ps = []
+    for i, vessel_p in enumerate(coronary.upsample_sections(upsample_z)):
+        vessel_ps.append(vessel_p)
+        
+        center_coord = vessel_p.center
+        center_tangent = vessel_p.vec_z
+        center_ortho = vessel_p.vec_y
         point_ind = ctVolume.absolute_to_pixel_coord(
             center_coord, return_float=True)
 
@@ -765,15 +810,15 @@ def curved_MPR(ctVolume, center_points, show_range=(0.0, 1.0), output_dim=(100, 
             volume=data,
             spacing=spacing,
             point=point_ind,
-            normal_vector_plane=normalized(center_tangent)*center_points_diff,
+            normal_vector_plane=center_tangent*output_z_spacing,
             output_shape=output_dim,
             prior_vec=None,
             sample_spacing=output_spacing,
-            known_vector_plane=normalized(center_ortho),
+            known_vector_plane=(center_ortho),
             padding=min_value)
 
         ret[i, ...] = plane
-    return ret, center_points_diff
+    return ret, center_points_diff, vessel_ps
 
 
 def curved_MPR_BS(ctVolume,
@@ -960,7 +1005,7 @@ def curved_MPR_BS(ctVolume,
 #     return ret, spl, np.array(lines1), np.array(lines2), np.array(lines3), np.array(first_drv), np.array(second_drv)
 
 
-# In[10]:
+# In[ ]:
 
 
 def running_mean(x, N):
@@ -969,22 +1014,53 @@ def running_mean(x, N):
     return (cumsum[N:] - cumsum[:-N]) / float(N)
 
 
-# In[11]:
+# In[ ]:
+
+
+vessel_p = namedtuple(
+    'vessel_p', 'center vec_z vec_y vec_x inner_wall outer_wall')
+
+
+def coord_rel_to_abs(coords, center, vec_y, vec_x, scale=1.0):
+    return np.matmul(coords, np.linalg.pinv(
+        np.array([vec_y, vec_x])).T) * scale + center
+
+
+def coord_abs_to_rel(coords, center, vec_y, vec_x, scale=1.0):
+    return np.matmul(coords - center, np.array([vec_y, vec_x]).T) / scale
+
+
+def lazy_property(fn):
+    '''Decorator that makes a property lazy-evaluated.
+    '''
+    attr_name = '_lazy_' + fn.__name__
+
+    @property
+    def _lazy_property(self):
+        if not hasattr(self, attr_name):
+            setattr(self, attr_name, fn(self))
+        return getattr(self, attr_name)
+    return _lazy_property
 
 
 class Coronary:
-    def __init__(self, result, n_per_section=100, flip_xz=True, guess_orifice=True):
-        center_points = result['center_points']
-        inner_wall_rel_coords = result['inner_wall']
+    def __init__(self, result, n_per_section=100, flip_xz=True, guess_orifice=False, cp_offset=(0, 0, 0)):
+        center_points = result['center_points'].copy()
+        inner_wall_rel_coords = result['inner_wall'].copy()
+        outer_wall_rel_coords = result['outer_wall'].copy()
 
 #         self.oct_section_points = oct_section_points.ravel().reshape(-1, 8, 3)
         self.center_points = center_points.reshape(-1, 3, 3)
+        self.center_points[:, 0, :] += nparr(cp_offset)
         self.inner_wall_rel_coords = inner_wall_rel_coords
+        self.outer_wall_rel_coords = outer_wall_rel_coords
 
         if flip_xz:
             #             self.oct_section_points = np.flip(self.oct_section_points, axis=2)
             self.inner_wall_rel_coords = np.flip(
                 self.inner_wall_rel_coords, axis=1)
+            self.outer_wall_rel_coords = np.flip(
+                self.outer_wall_rel_coords, axis=1)
             self.center_points = np.flip(self.center_points, axis=2)
 
         # normal vector from center_points is not extactly on oct_ponits' plane
@@ -1006,52 +1082,109 @@ class Coronary:
         if guess_orifice:
             self.guess_orifice()
 
-        if n_per_section:
-            self.resample_section(n_per_section=n_per_section)
+#         if n_per_section:
+#             self.resample_section(n_per_section=n_per_section)
 
         self.center_line = BSpline3D(self.center_points.reshape(-1, 9))
         self.total_len = self.center_line.total_len
 #         self.center_points = center_points
 
+    def center_vec(self, u):
+        if u == 1:
+            return self.center_points[-1]
+
+        b = np.digitize(u, self.center_line.u) - 1
+
+        u0, u1 = self.center_line.u[b:(b+2)]
+        if self.center_line.u[b] == u:
+            return self.center_points[b]
+
+        cp = self.center_line.spline(u)
+
+        vec_z0, vec_z1 = self.center_points[b:(b+2), 1]
+        vec_z0 = normalized(vec_z0)
+        vec_z1 = normalized(vec_z1)
+
+        vec_z = normalized(self.drv1(u))
+
+        if np.dot(vec_z, ((u-u1)*vec_z0+(u-u0)*vec_z1)/(u1-u0)) < 0:
+            vec_z = -vec_z
+
+        vec_y = self.vec_y_spline(u) - cp
+        vec_y = normalized(vec_y-projection(vec_y, vec_z))
+
+#         if np.dot(vec_y, vec_y0+vec_y1)<0:
+#             vec_y = -vec_y
+#         vec_x = normalized(np.cross(vec_y, vec_z))
+        return np.vstack((cp, vec_z, vec_y))
+
     def convertInnerWallPoints(self, result):
-        point_count = result['inner_wall_point_count']
+        point_count = result['inner_wall_point_count'].copy()
         points_rel_coor = self.inner_wall_rel_coords
+
+        point_count2 = result['outer_wall_point_count'].copy()
+        points_rel_coor2 = self.outer_wall_rel_coords
 
         ret = []
         ret2 = []
+        ret3 = []
+        ret4 = []
         last_ind = 0
+        last_ind2 = 0
         scale = 0.5
-        for i, (p_count, cp) in enumerate(zip(point_count, self.center_points)):
+        for i, (p_count, p_count2, cp) in enumerate(zip(point_count, point_count2, self.center_points)):
             rel_coor = points_rel_coor[(last_ind):(last_ind+p_count)]
-            center, tangent, vec1 = cp
+            rel_coor[:, 1] *= -1
 
-            tangent = normalized(tangent)
-            vec1 = normalized(vec1)
-            vec2 = np.cross(vec1, tangent)
-            vec2 = normalized(vec2)
-            rel_coor = np.insert(rel_coor, 0, 0, axis=1)
+            rel_coor2 = points_rel_coor2[(last_ind2):(last_ind2+p_count2)]
+            rel_coor2[:, 1] *= -1
+
+            center, vec_z, vec_y = cp
+
+            vec_z = normalized(vec_z)
+            vec_y = normalized(vec_y)
+            vec_x = np.cross(vec_y, vec_z)
+            vec_x = normalized(vec_x)
+#             rel_coor = np.insert(rel_coor, 0, 0, axis=1)
 #             abs_coor = np.matmul(rel_coor, np.array([vec1, vec2])) + center
 
             # if two succesive points are identical, spline fit show error
-            while True:
-                diff_zero = np.where(
-                    np.max(np.abs(np.diff(rel_coor, axis=0)), axis=1) < 1e-9)[0]
-                if diff_zero.size:
-                    rel_coor = np.delete(rel_coor, diff_zero[0], axis=0)
-                    print('Detect overlapping points at #{}'.format(i))
-                else:
-                    break
+            diff_zero = np.where(
+                np.max(np.abs(np.diff(rel_coor, axis=0)), axis=1) < 1e-9)[0]
+            if diff_zero.size:
+                rel_coor = np.delete(rel_coor, diff_zero, axis=0)
+#                     print('Detect overlapping points at #{}'.format(i))
 
-            abs_coor = np.matmul(rel_coor, np.linalg.inv(
-                np.array([tangent, vec1, -vec2])).T) * scale + center
+            diff_zero = np.where(
+                np.max(np.abs(np.diff(rel_coor2, axis=0)), axis=1) < 1e-9)[0]
+            if diff_zero.size:
+                rel_coor2 = np.delete(rel_coor2, diff_zero, axis=0)
+
+            abs_coor = np.matmul(rel_coor, np.linalg.pinv(
+                np.array([vec_y, vec_x])).T) * scale + center
 
             ret.append(abs_coor)
             ret2.append(rel_coor)
 
             last_ind += p_count
 
+            abs_coor2 = np.matmul(rel_coor2, np.linalg.pinv(
+                np.array([vec_y, vec_x])).T) * scale + center
+
+            ret3.append(abs_coor2)
+            ret4.append(rel_coor2)
+
+            last_ind2 += p_count2
+
         self.inner_wall_abs_coords = ret
         self.inner_wall_rel_coords = ret2
+        self.outer_wall_abs_coords = ret3
+        self.outer_wall_rel_coords = ret4
+
+#         self._inner_wall_abs_spl = None
+#         self._inner_wall_rel_spl = None
+#         self._outer_wall_abs_spl = None
+#         self._outer_wall_rel_spl = None
 
     def resample_section(self, n_per_section=100):
         #         with concurrent.futures.ProcessPoolExecutor(
@@ -1069,7 +1202,7 @@ class Coronary:
         #                                  for i in range(self.section_points.shape[1])]
 
         self.section_spl = [BSpline3D(
-            wall_p, simple_init=True, periodic=True) for wall_p in self.inner_wall_abs_coords]
+            wall_p, simple_init=True, periodic=True) for wall_p in self.inner_wall_rel_coords]
         self.section_u0 = [spl.intersect_u(p[0], p[2]) for spl, p in zip(
             self.section_spl, self.center_points)]
         self.section_points = np.array([spl.spline(np.mod(np.linspace(0, 1, n_per_section+1)+u, 1.0))[0:-1]
@@ -1077,21 +1210,147 @@ class Coronary:
         self.longitudinal_spl = [BSpline3D(self.section_points[:, i, :], simple_init=True)
                                  for i in range(self.section_points.shape[1])]
 
-    def BSplineSurfacePoint(self, u, return_center=False):
-        if hasattr(u, '__iter__'):
-            ret = np.array([self.BSplineSurfacePoint(u_) for u_ in u])
-            if return_center:
-                return ret[:, 0], ret[:, 1]
-            else:
-                return ret
+    @lazy_property
+    def inner_wall_abs_spl(self):
+        return self._wall_spl('inner', 'abs')
 
-        center = self.center_line.spline(u)
-        section_points = np.array(
-            [spl.spline(u) for spl in self.longitudinal_spl])
-        if return_center:
-            return section_points, center
+    @lazy_property
+    def inner_wall_rel_spl(self):
+        return self._wall_spl('inner', 'rel')
+
+    @lazy_property
+    def outer_wall_abs_spl(self):
+        return self._wall_spl('outer', 'abs')
+
+    @lazy_property
+    def outer_wall_rel_spl(self):
+        return self._wall_spl('outer', 'rel')
+
+    def _wall_spl(self, in_or_out, abs_or_rel):
+        coords = getattr(
+            self, '{}_wall_{}_coords'.format(in_or_out, abs_or_rel))
+        ret = []
+        ret2 = []
+        for wall_p, cp in zip(coords, self.center_points):
+            spl = BSpline3D(wall_p, simple_init=True, periodic=True)
+            ret.append(spl)
+            if abs_or_rel == 'abs':
+                ret2.append(spl.intersect_u(cp[0], cp[2]))
+            else:
+                ret2.append(spl.intersect_u(np.array([0,0]), np.array([0,1])))
+        setattr(self, '{}_wall_{}_spl_u0'.format(in_or_out, abs_or_rel), ret2)
+        return ret
+
+    def upsample_sections(self, upsample_ratio=1, xy_samples=1000):
+
+        for i, ((u0, u1), 
+                (cp0, cp1), 
+                (in0, in1), 
+                (ou0, ou1), 
+                (rel_in0, rel_in1), 
+                (rel_ou0, rel_ou1), 
+                (in_u0, in_u1), 
+                (ou_u0, ou_u1)) in enumerate(zip(pairwise(self.center_line.u), 
+                                                   pairwise(self.center_points),
+                                                   pairwise(self.inner_wall_abs_spl),
+                                                   pairwise(self.outer_wall_abs_spl),
+                                                   pairwise(self.inner_wall_rel_spl),
+                                                   pairwise(self.outer_wall_rel_spl),
+                                                   pairwise(self.inner_wall_rel_spl_u0), 
+                                                   pairwise(self.outer_wall_rel_spl_u0))):
+            center0, vec_z0, vec_y0 = cp0
+            vec_z0 = normalized(vec_z0)
+            vec_y0 = normalized(vec_y0)
+
+            yield vessel_p(center0, vec_z0, vec_y0, normalized(np.cross(vec_y0, vec_z0)), in0, ou0)
+
+            center1, vec_z1, vec_y1 = cp1
+            vec_z1 = normalized(vec_z1)
+            vec_y1 = normalized(vec_y1)
+            
+            rel_coord_in0 = rel_in0.spline(np.mod(np.linspace(0,1,xy_samples) + in_u0,1.0)) 
+            rel_coord_in1 = rel_in1.spline(np.mod(np.linspace(0,1,xy_samples) + in_u1,1.0)) 
+            rel_coord_ou0 = rel_ou0.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u0,1.0)) 
+            rel_coord_ou1 = rel_ou1.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u1,1.0)) 
+
+            for j in range(1, upsample_ratio):
+                u = (j*u0+(upsample_ratio-j)*u1)/upsample_ratio
+
+                cp = self.center_line.spline(u)
+
+#                 vec_z = normalized(self.center_line.drv1(u))
+
+#                 if np.dot(vec_z, ((u-u1)*vec_z0+(u-u0)*vec_z1)/(u1-u0)) < 0:
+#                     vec_z *= -1
+                vec_z = ((u1-u)*vec_z0+(u-u0)*vec_z1)/(u1-u0)
+
+                vec_y = self.center_line.vec_y_spline(u) - cp
+                vec_y = normalized(vec_y-projection(vec_y, vec_z))
+
+                if np.dot(vec_y, ((u1-u)*vec_y0+(u-u0)*vec_y1)/(u1-u0)) < 0:
+                    vec_y *= -1
+
+                vec_x = normalized(np.cross(vec_y, vec_z))
+                
+                rel_coord_in = (j*rel_coord_in0+(upsample_ratio-j)*rel_coord_in1)/upsample_ratio
+                abs_coord_in = coord_rel_to_abs(rel_coord_in, cp, vec_y, vec_x, scale=0.5)
+                
+                rel_coord_out = (j*rel_coord_ou0+(upsample_ratio-j)*rel_coord_ou1)/upsample_ratio
+                abs_coord_out = coord_rel_to_abs(rel_coord_out, cp, vec_y, vec_x, scale=0.5)
+                
+                
+                
+                yield vessel_p(cp, vec_z, vec_y, vec_x, BSpline3D(abs_coord_in, simple_init=True, periodic=True), 
+                              BSpline3D(abs_coord_out, simple_init=True, periodic=True))
         else:
-            return section_points
+            yield vessel_p(center1, vec_z1, normalized(vec_y1), normalized(np.cross(vec_y1, vec_z1)), in1, ou1)
+
+
+#     def section(self, u):
+#         if u == 1 or u == 0:
+#             center, vec_z, vec_y = self.center_points[-1 if u == 1 else 0]
+#             section_points = np.array(
+#                 [spl.spline(u) for spl in self.longitudinal_spl])
+#             return vessel_p(center, normalized(vec_z), normalized(vec_y), normalized(np.cross(vec_y, vec_z)), section_points)
+
+#         b = np.digitize(u, self.center_line.u) - 1
+
+#         u0, u1 = self.center_line.u[b:(b+2)]
+#         if u0 == u:
+#             center, vec_z, vec_y = self.center_points[b]
+#             section_points = np.array(
+#                 [spl.spline(u) for spl in self.longitudinal_spl])
+#             return vessel_p(center, normalized(vec_z), normalized(vec_y), normalized(np.cross(vec_y, vec_z)), section_points)
+
+#         cp = self.center_line.spline(u)
+
+#         vec_z0, vec_z1 = self.center_points[b:(b+2), 1]
+#         vec_z0 = normalized(vec_z0)
+#         vec_z1 = normalized(vec_z1)
+
+#         vec_y0, vec_y1 = self.center_points[b:(b+2), 2]
+#         vec_y0 = normalized(vec_z0)
+#         vec_y1 = normalized(vec_z1)
+
+#         vec_z = ((u1-u)*vec_z0+(u-u0)*vec_z1)/(u1-u0)
+
+#         vec_y = self.center_line.vec_y_spline(u) - cp
+#         vec_y = normalized(vec_y-projection(vec_y, vec_z))
+
+#         if np.dot(vec_y, ((u1-u)*vec_y0+(u-u0)*vec_y1)/(u1-u0)) < 0:
+#             vec_y *= -1
+
+#         vec_x = normalized(np.cross(vec_y, vec_z))
+
+#         c = np.dot(vec_z, cp)
+
+#         section_points = np.array(
+#             [spl.spline(fsolve(lambda u, spl, vec_z, c:
+#                                np.dot(spl(u), vec_z)-c, u,
+#                                (spl.spline, vec_z, c), xtol=1e-9)[0])
+#              for spl in self.longitudinal_spl])
+
+#         return vessel_p(cp, vec_z, vec_y, vec_x, section_points)
 
     def guess_orifice(self):
         oct_distance = [np.mean(list(map(np.linalg.norm, oct_p-cen_p))) for (oct_p, cen_p)
@@ -1107,24 +1366,27 @@ class Coronary:
         self.inner_wall_rel_coords = self.inner_wall_rel_coords[i:]
         self.center_points = self.center_points[i:, ...]
 
-    def plot(self, s=0, e=None, step=1, wall_points=None):
-        if e is None:
-            e = self.center_points.shape[0]
+    def plot(self, s=0, e=1.0, step=1, wall_points=None):
+        if s is not None:
+            s = int(self.center_points.shape[0] * s)
+
+        if e is not None:
+            e = int(self.center_points.shape[0] * e)
 
         fig = plt.figure(figsize=(8, 8))
         ax = Axes3D(fig)
         for p in self.center_points[s:e:step, 0, :]:
             ax.plot(*(p.reshape(-1, 3).T), 'ok', alpha=0.7)
         if wall_points:
-            linspace = np.linspace(0,1, wall_points+1)[:-1]
+            linspace = np.linspace(0, 1, wall_points+1)[:-1]
             for spl in self.section_spl[s:e:step]:
                 ax.plot(*(spl.spline(linspace)).T, '.r', alpha=0.2)
         for ps in self.inner_wall_abs_coords[s:e:step]:
-                ax.plot(*np.array(ps).T, 'ob', alpha=0.2)
+            ax.plot(*np.array(ps).T, 'ob', alpha=0.2)
         plt.show()
 
 
-# In[14]:
+# In[ ]:
 
 
 class BSpline3D:
@@ -1156,10 +1418,14 @@ class BSpline3D:
         #         else:
         self.spline, self.tck, self.u = self.init_spline(
             points[:, 0:3], per=periodic)
-        if points.shape[1] > 3:
-            self.vector1_spline, _, _ = self.init_spline(
-                points[:, 0:3] + points[:, 3:6], per=periodic)
-
+#         if points.shape[1] > 3:
+#             self.vector1_spline, _, _ = self.init_spline(
+#                 points[:, 0:3] + points[:, 3:6], per=periodic)
+        if points.shape[1] > 6:
+            self.vec_y_spline, _, _ = self.init_spline(
+                points[:, 0:3] + points[:, 6:9], per=periodic)
+        
+        
         self.points = points
 
         #         self.between_angles = []
@@ -1181,8 +1447,13 @@ class BSpline3D:
                 self.ls = self.linspace(0.0, 1.0, samples)
                 self.ls2 = np.linspace(0.0, 1.0, samples)
                 self.ls_drv = np.array([self.drv1(t) for t in self.ls])
-
+    
+    
     def init2(self):
+        # https://stackoverflow.com/questions/13384859/coefficients-of-spline-interpolation-in-scipy
+        t,c,k = self.tck
+        self.ppoly = np.swapaxes(np.array([PPoly.from_spline((t,c_,k), extrapolate=('periodic' if self.periodic else True)).c.T for c_ in c]),0,1)
+        
         self.seg_len = []
 
         self.total_len = 0
@@ -1208,12 +1479,12 @@ class BSpline3D:
 #             tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, 
 #                 u=np.linspace(0,1,data.shape[0]), quiet=1)
         else:
-            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, u=np.linspace(0,1, data.shape[0]), quiet=1)
+            tck, u = interpolate.splprep(data.T, s=s, nest=-1, k=k, per=per, quiet=1, u = np.linspace(0,1,data.shape[0]))
+        
         spline = interpolate.BSpline(
             np.array(tck[0]),
-            np.array(tck[1]).T, tck[2])
+            np.array(tck[1]).T, tck[2], extrapolate = 'periodic' if per else True)
         return spline, tck, u
-
 
 #     def distances_var(self, t, a, b):
 #         atb = np.concatenate(([a], t, [b]))   # added endpoints
@@ -1239,7 +1510,8 @@ class BSpline3D:
             return self.spline(ret_u), ret_u
         else:
             return self.spline(ret_u)
-
+   
+    
     def u2_u(self, t, precision=1e-5, maxLoop=100, recursive=True):
         '''
         tranform u2 to u
@@ -1295,7 +1567,7 @@ class BSpline3D:
 #         print(loop_i)
         return ret
 
-    def intersect_u(self, start_p, vector, return_coord=False, threshold=1e-4):
+    def intersect_u(self, start_p, vector, return_coord=False, threshold=1e-5, max_iter=1000):
         '''
         for closed B-spline, find the intersection with the vector start from start_p, return coresponding u or coord
         '''
@@ -1305,8 +1577,13 @@ class BSpline3D:
 
         target = normalized(vector)
         ret = None
+        
+        i = 0
         while 1:
-
+            i+=1
+            
+            if i>max_iter:
+                raise Exception('max iterations reached!')
             a1 = np.dot(v1, target)
             a2 = np.dot(v2, target)
             if 1-a1 < threshold:
@@ -1333,6 +1610,63 @@ class BSpline3D:
                 v1 = v_
 
         return ret if not return_coord else self.spline(ret)
+    
+    def intersect_plane(self, start_u_range, center_point, normal_vec_of_plane, return_coord=False, threshold = 1e-5, max_iter=1000):
+        u0,u1 = min(start_u_range), max(start_u_range)
+        
+        vec_z = normalized(normal_vec_of_plane)
+        cp = center_point
+        spl = self.spline
+        i=0
+        ret = None
+        
+        while 1:
+            i+=1
+            if i>max_iter:
+                print(start_u_range, u0, u1)
+                raise Exception('max iterations reached!')
+            dot0 = np.dot(spl(u0)-cp, vec_z)
+            dot1 = np.dot(spl(u1)-cp, vec_z)
+            if dot0 * dot1 <=0:
+                break
+            
+            if dot1 > dot0:
+                u0, u1 = u1, u1+(u1-u0)
+            else:
+                u0, u1 = u0 - (u1-u0), u0
+        
+        i=0
+        while 1:
+            i+=1
+            
+            if i>max_iter:
+                print(start_u_range, u0, u1)
+                raise Exception('max iterations reached!')
+            
+            dot0 = abs(np.dot(spl(u0)-cp , vec_z))
+            dot1 = abs(np.dot(spl(u1)-cp , vec_z))
+            if dot0<threshold:
+                ret = u0
+                break
+            elif dot1<threshold:
+                ret = u1
+                break
+            
+            
+            u = (u0+u1)/2
+            vec = normalized(spl(u) - cp)
+            if abs(np.dot(vec, vec_z)) < threshold:
+                ret= u
+                break
+            if dot0 < dot1:
+                u1 = u
+            else:
+                u0 = u
+                
+        return ret if not return_coord else spl(ret)
+            
+            
+        
 
     def est_length(self, s=0.0, e=1.0, sample_points=10, precision=1e-5):
         if s == e:
@@ -1349,9 +1683,13 @@ class BSpline3D:
                 pairwise(v), center_points, pairwise(ls)):
             seg_len = np.linalg.norm(b - a)
             triang_len = np.linalg.norm(c - a) + np.linalg.norm(c - b)
-            delta_len = (triang_len - seg_len) / triang_len
-            l += triang_len if delta_len < precision else self.est_length(
-                i1, i2, 10, precision)
+            
+            if triang_len < precision:
+                l += triang_len
+            else:
+                delta_len = (triang_len - seg_len) / triang_len
+                l += triang_len if delta_len < precision else self.est_length(
+                    i1, i2, 10, precision)
         return l
 
     def drv(self, t, nu=1):
@@ -1464,23 +1802,37 @@ def test_cubic_spline():
     plt.show()
 
 
-# In[15]:
+# In[ ]:
 
 
-def mask_overlay_data(data, mask, window=(800, 2000), figsize=(8, 8)):
+def mask_overlay_data(data, mask, mask2=None, window=(500, 2000), figsize=(8, 8), output_dir=None):
     new_data = np.repeat(data[..., np.newaxis], 3, axis=-1).astype(np.float64)
+    
     new_mask = np.zeros(mask.shape)
     new_mask = np.repeat(new_mask[..., np.newaxis], 3, axis=-1)
     new_mask[..., 0] = mask
-
+    
+    new_mask2 = np.zeros(mask.shape)
+    new_mask2 = np.repeat(new_mask2[..., np.newaxis], 3, axis=-1)
+        
+    if mask2 is not None:
+        new_mask2[..., 1] = mask2
+    
     w1, w2 = window[0]-window[1]/2, window[0] + window[1]/2
     new_data = (np.clip(new_data, w1, w2) - w1)/(w2-w1)
+    
+    if output_dir:
+        d = Path(output_dir)
+        if not d.exists():
+            os.makedirs(str(d.resolve()))
+        for i, sl in enumerate(new_data+new_mask+new_mask2):
+            plt.imsave(str(d.joinpath('{}.png'.format(i))), sl)
+    else:
+        ViewCT(new_data+new_mask+new_mask2, window=(0.5, 0.5),
+               cmap=None, subplots=(1, 1), interpolation=None, figsize=figsize)
 
-    ViewCT(new_data+new_mask, window=(0.5, 0.5),
-           cmap=None, subplots=(1, 1), interpolation=None, figsize=figsize)
 
-
-# In[16]:
+# In[ ]:
 
 
 def plots(data, **kwargs):
@@ -1495,10 +1847,10 @@ def plots(data, **kwargs):
     plt.tight_layout()
 
 
-# In[56]:
+# In[3]:
 
 
-def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None):
+def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None, upsample_z=1, no_fill=False, outer_wall=False):
     def set_mask(point_coord):
         vec = point_coord - cp
         y = np.dot(vec, y_axis)
@@ -1512,12 +1864,12 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
     precision = nparr(precision, 2)
     output_dim = nparr(output_dim, 2)
     new_dim = output_dim * precision
-    cor = coronary
+    
 
     _t = time()
 
-    cmpr, pixel_spacing = curved_MPR(
-        ctVolume, cor.center_points, output_dim=output_dim, output_spacing=output_spacing)
+    cmpr, pixel_spacing, vessel_ps = curved_MPR(
+        ctVolume, cor, output_dim=output_dim, output_spacing=output_spacing, upsample_z=upsample_z)
 #     ret = np.empty((cor.center_points.shape[0], new_dim[0], new_dim[1]))
 
     if output_spacing is None:
@@ -1537,29 +1889,99 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
 
     # abs coords conversion
 
-    results = []
-    result_coord = []
-
+    results = {}
+    results2 = {}
+    point_count = cor.center_points.shape[0]
+    ret = np.zeros((point_count + (point_count-1)*(upsample_z-1), new_dim[0], new_dim[1]))
+    
     print('straighten: {}'.format(time()-_t))
     _t = time()
-    with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
-        for z, (center_point, spl) in enumerate(zip(cor.center_points, cor.section_spl)):
+    
+    
+#     for z, rel_coords in enumerate(cor.inner_wall_rel_coords):
+#         spl = CubicSpline(np.linspace(0,1,rel_coords.shape[0]+1), 
+#                           np.append(rel_coords, [rel_coords[0]], axis=0), 
+#                           bc_type='periodic')
+        
+#         n2 = np.ceil(
+#             3 * 1000 / min_sp *
+#             np.linalg.norm(spl(0) - spl(1 / 1000))
+#         ).astype(np.int)
+        
+#         rel_coords = spl(np.linspace(0,1,n2))
 
+#         rel_coords /= min_sp * 2
+        
+#         rel_coords += center_ind
+#         rel_coords = np.floor(rel_coords+0.5).astype(np.int)
+#         rel_coords = np.clip(rel_coords, 0, np.array(ret.shape[1:3])-1)
+        
+#         rel_coords = np.append(rel_coords, [np.floor(center_ind+0.5).astype(np.int)], axis=0)
+#         rel_coords = np.insert(rel_coords, 0, z, axis=1)
+#         ret[tuple(rel_coords.T)] = 1
+        
+#     for z, rel_coords in enumerate(cor.outer_wall_rel_coords):
+#         spl = CubicSpline(np.linspace(0,1,rel_coords.shape[0]+1), 
+#                           np.append(rel_coords, [rel_coords[0]], axis=0), 
+#                           bc_type='periodic')
+        
+#         n2 = np.ceil(
+#             3 * 1000 / min_sp *
+#             np.linalg.norm(spl(0) - spl(1 / 1000))
+#         ).astype(np.int)
+        
+#         rel_coords = spl(np.linspace(0,1,n2))
+
+#         rel_coords /= min_sp * 2
+        
+#         rel_coords += center_ind
+#         rel_coords = np.floor(rel_coords+0.5).astype(np.int)
+#         rel_coords = np.clip(rel_coords, 0, np.array(ret.shape[1:3])-1)
+        
+#         rel_coords = np.append(rel_coords, [np.floor(center_ind+0.5).astype(np.int)], axis=0)
+#         rel_coords = np.insert(rel_coords, 0, z, axis=1)
+#         ret2[tuple(rel_coords.T)] = 1
+
+#     return ret, ret2, cmpr
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
+        #         for z, (center_point, spl) in enumerate(zip(cor.center_points, cor.section_spl)):
+        for z, vessel_p in enumerate(vessel_ps):
             #         plane = np.empty(new_dim)
 
             #         u0 = spl.intersect_u(cp, center_point[2])
 
-            results.append(executor.submit(straighten_sub, center_point,
-                                           spl, precision, output_spacing, center_ind, new_dim, z, min_sp))
+            results[executor.submit(straighten_sub, vessel_p, vessel_p.inner_wall, precision,
+                                    output_spacing, center_ind, new_dim, z, min_sp, no_fill)] = z
+             
+#             results[z] = straighten_sub(vessel_p, vessel_p.inner_wall, precision, output_spacing, center_ind, new_dim, z, min_sp)
+#             break
 
         for fs in concurrent.futures.as_completed(results):
-            result_coord.append(fs.result())
+            z = results[fs]
+            ret[z, ...] = fs.result()
+        
+        if outer_wall:
+            ret2 = np.zeros((point_count + (point_count-1)*(upsample_z-1), new_dim[0], new_dim[1]))
 
-    print(time()-_t)
-    _t = time()
-    ret = output_mask((cor.center_points.shape[0], output_dim[0], output_dim[1]), np.insert(
-        precision, 0, 1, axis=0), result_coord, _t)
+            for z, vessel_p in enumerate(vessel_ps):  
+                results2[executor.submit(straighten_sub, vessel_p, vessel_p.outer_wall, precision,
+                                        output_spacing, center_ind, new_dim, z, min_sp, no_fill)] = z
+            for fs in concurrent.futures.as_completed(results2):
+                z = results2[fs]
+                ret2[z, ...] = fs.result()
 
+
+        print(time()-_t)
+        _t = time()
+    #     ret = output_mask((cor.center_points.shape[0], output_dim[0], output_dim[1]), np.insert(
+    #         precision, 0, 1, axis=0), result_coord, _t)
+        if np.amax(precision) > 1:
+            ret = groupedAvg(ret, precision, axis=(1, 2))
+            ret2 = groupedAvg(ret2, precision, axis=(1, 2))
+
+            
+        
 #     for coor in result_coord:
 #         coor = np.floor(np.array(coor) + 0.5).astype(np.int)
 #         ret[tuple(coor.T)] = 1
@@ -1570,56 +1992,108 @@ def straighten_data_mask(ctVolume, coronary, precision=(1, 1), show_range=(0.0, 
 #     for i, prec in enumerate(precision):
 #         if prec != 1:
 #             ret = groupedAvg(ret, prec, axis=i+1)
+    
+    if outer_wall:
+        return ret, ret2, cmpr
+    else:
+        return ret, cmpr
 
-    return ret, cmpr
 
-
-def straighten_sub(center_point, spl, precision, output_spacing, center_ind, new_dim, z, min_sp):
+def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim, z, min_sp, no_fill):
 
     all_coord = []
 
-    cp = center_point[0]
+    cp = vessel_p.center
+#     spl = BSpline3D(vessel_p.wall_points, periodic=True, simple_init=True)
+    
     n2 = np.ceil(
         3 * 1000 / min_sp *
         np.linalg.norm(spl.spline(0) - spl.spline(1 / 1000))
     ).astype(np.int)
 #         n2_linspace = np.mod(np.linspace(u0, u0 + 1 - 1 / n2, n2), 1.0)
     n2 = max(n2, 2)
-    n2_linspace = np.linspace(0, 1-1/n2, n2)
+    n2_linspace = np.linspace(0, 1.2, 4*n2)
     n3 = np.ceil(n2 / np.pi / 2).astype(np.int)
     n3 = max(n3, 1)
-    z_axis = normalized(center_point[1])
-    y_axis = normalized(center_point[2])
-#         y_axis = normalized(spl.spline(u0)-cp)
-    x_axis = normalized(np.cross(y_axis, z_axis))
+    z_axis = vessel_p.vec_z
+    y_axis = vessel_p.vec_y
+    x_axis = vessel_p.vec_x
+
+    axes = np.array([y_axis, x_axis]).T
 
     section_points = spl.spline(n2_linspace)
 #     set_mask(cp)
-    straighten_set(cp, all_coord, cp, precision, output_spacing,
-                   center_ind, y_axis, x_axis, new_dim, z)
+#     straighten_set(cp, all_coord, cp, precision, output_spacing,
+#                    center_ind, axes, new_dim, z)
+#     plot3d(vessel_p.wall_points)
+    rel_coord = np.matmul(section_points-cp, axes) / min_sp + center_ind
+
+    rel_coord = np.floor(rel_coord+0.5).astype(np.int)
+
+    min_x, max_x = minmax(rel_coord[:, 1])
+    min_y, max_y = minmax(rel_coord[:, 0])
+
+    origin = np.array([min_y, min_x])
+    
+#     print(rel_coord, origin)
+    
+    rel_coord -= origin
+
+    shape = (max_y-min_y+1, max_x-min_x+1)
+    
+#     arr = np.zeros(shape, dtype=np.int)
+#     arr[tuple(rel_coord.T)]=1
+    arr = coo_matrix((np.repeat(
+        1, rel_coord.shape[0]), rel_coord.T), shape=shape, dtype=np.int).toarray()
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+    if not no_fill:
+        
+
+    #     print(rel_coord)
+
+        try:
+            cv2.floodFill(arr, None, tuple(np.floor(
+                center_ind-origin+0.5).astype(np.int)), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+        except:
+            pass
+
+    ret = np.zeros(new_dim)
+    ret_coord = np.array(np.where(arr > 0)).T + origin
+    
+    ## some indexes are out of boundary of array
+#     ret_coord = np.clip(ret_coord, 0, new_dim-1)
+    ret_coord_=[]
+    for coord in ret_coord:
+        if (coord>=0).all() and (coord<new_dim).all():
+            ret_coord_.append(coord)
+    ret_coord = np.array(ret_coord_)
+    
+    ret[tuple(ret_coord.T)] = 1
+    
+    
+#     plt.imshow(ret, cmap = 'gray')
+    return ret
+
     for p in section_points:
         #             sp.append(p)
         for j in range(n3):
             straighten_set(((n3 - j) * p + j * cp) / n3, all_coord, cp, precision,
-                           output_spacing, center_ind, y_axis, x_axis, new_dim, z)
+                           output_spacing, center_ind, axes, new_dim, z)
 #             set_mask(((n3 - j) * p + j * cp) / n3)
 #                 break
 
     return all_coord
 
 
-def straighten_set(point_coord, all_coord, cp, precision, output_spacing, center_ind, y_axis, x_axis, new_dim, z):
-    vec = point_coord - cp
-    y = np.dot(vec, y_axis)
-    x = np.dot(vec, x_axis)
-    idx = np.array([y, x]) / output_spacing * precision + center_ind
+def straighten_set(point_coord, all_coord, cp, precision, output_spacing, center_ind, axes, new_dim, z):
+    idx = np.matmul(point_coord - cp, axes) /         output_spacing * precision + center_ind
     idx = np.clip(idx, -0.5, new_dim-0.500001)
     idx = np.insert(idx, 0, z, axis=0)
 #         sp.append(idx)
     all_coord.append(idx)
 
 
-# In[18]:
+# In[ ]:
 
 
 # %%pixie_debugger
@@ -1658,10 +2132,10 @@ def plot_sec(ct, cor, n):
 # plot_sec(ct, cor, 30)
 
 
-# In[57]:
+# In[ ]:
 
 
-def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None):
+def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None, no_fill=False):
     def set_mask(point_coor):
         #         all_points.append(point_coor)
         #         return
@@ -1709,20 +2183,28 @@ def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None):
     all_coord = []
     _t = time()
     ctInfo = dict(spacing=spacing, origin=origin)
-    if hasattr(coronary, 'longitudinal_spl'):
-        #     if 0:
-
-        n1 = np.ceil(coronary.center_line.total_len / min_sp).astype(np.int)
-        n1 = max(n1, 2)
+#     if hasattr(coronary, 'longitudinal_spl'):
+    if 1:
+        
+        if no_fill:
+            n1 = 1
+        else:
+            n1 = np.ceil(coronary.center_line.total_len / min_sp / coronary.center_line.u.shape[0]).astype(np.int)
+            n1 = max(n1, 2)
         results = []
         result_coord = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
-            for i, u in enumerate(np.linspace(0, 1, n1+1)):
-                center_point = coronary.center_line.spline(u)
-                section_points0 = np.array(coronary.BSplineSurfacePoint(u))
-
+#             for i, u in enumerate(np.linspace(0, 1, 4*n1)):
+            for i, vessel_p in enumerate(coronary.upsample_sections(n1)):
+#                 center_vec = coronary.center_line.center_vec(u)
+                
+#                 section_points0 = np.array(coronary.BSplineSurfacePoint(u))
                 results.append(executor.submit(generate_mask_sub3, ctInfo,
-                                               center_point, section_points0, precision, shape1, min_sp, i))
+                                               vessel_p, precision, shape1, min_sp, i, no_fill))
+                
+#                 results.append(generate_mask_sub3(ctInfo,
+#                                                center_vec, section_points0, precision, shape1, min_sp, i))
+#                 break
 
             for fs in concurrent.futures.as_completed(results):
                 result_coord.append(fs.result())
@@ -1853,7 +2335,7 @@ def output_mask(original_shape, precision, result_coord, _t=None):
         shape1 = original_shape * precision
         ret = np.zeros(shape1)
         for coord in result_coord:
-            coord = np.floor(np.array(coord) + 0.5).astype(np.int)
+            coord = np.floor(coord + 0.5).astype(np.int)
             ret[tuple(coord.T)] = 1
 
 #     print(zs.min(), zs.max())
@@ -1882,7 +2364,7 @@ def output_mask(original_shape, precision, result_coord, _t=None):
     return ret
 
 
-# In[20]:
+# In[ ]:
 
 
 def generate_mask_set(point_coor, all_coord, ctInfo, precision, shape1):
@@ -1896,16 +2378,29 @@ def generate_mask_set(point_coor, all_coord, ctInfo, precision, shape1):
     all_coord.append(float_ind)
 
 
-def generate_mask_sub3(ctInfo, center_point, section_points0, precision, shape1, min_sp, i):
+def generate_mask_sub3(ctInfo, vessel_p, precision, shape1, min_sp, i, no_fill):
     _t = time()
     all_coord = []
-
-    generate_mask_set(center_point, all_coord, ctInfo, precision, shape1)
-    spl = BSpline3D(section_points0, simple_init=True)
+    
+#     spl = BSpline3D(vessel_p.wall_points, simple_init=True)
+    spl = vessel_p.inner_wall
     n2 = np.ceil(
         3 * 1000 /
-        (min_sp / np.linalg.norm(spl.spline(0) - spl.spline(1 / 1000)))
+        min_sp * np.linalg.norm(spl.spline(0) - spl.spline(1 / 1000))
     ).astype(np.int)
+    
+    
+    n2_linspace = np.linspace(0, 1, n2 * 4)
+    section_points = spl.spline(n2_linspace)
+    point_coor = fill_lumen(section_points, vessel_p, min_sp)
+    float_ind = (point_coor-ctInfo['origin'])/ctInfo['spacing']
+    float_ind *= precision
+    float_ind = np.clip(float_ind, -0.5, shape1-0.500001)
+#     print(float_ind.shape)
+#     print(float_ind)
+#     plot3d(float_ind)
+    
+    return float_ind
 
     if i < 10:
         n2 = max(n2*2, 2)
@@ -1917,6 +2412,9 @@ def generate_mask_sub3(ctInfo, center_point, section_points0, precision, shape1,
         n3 = np.ceil(n2 / np.pi / 2).astype(np.int)
         n3 = max(n3, 1)
 
+    if no_fill:
+        n3 = min(n3, max(precision))
+        
     n2_linspace = np.linspace(0, 1 - 1 / n2, n2)
 
     section_points = spl.spline(n2_linspace)
@@ -1998,7 +2496,7 @@ def generate_mask_sub2(center_point, section_points, n3, ctInfo, precision, shap
     return all_coord
 
 
-# In[21]:
+# In[ ]:
 
 
 def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
@@ -2058,7 +2556,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
         print('{} saved!'.format(vessel_name))
 
 
-# In[22]:
+# In[ ]:
 
 
 def save_straightened_mask(ctVolume, result, vessel_name='', save_dir='./', precision=(1, 1)):
@@ -2098,7 +2596,7 @@ def save_straightened_mask(ctVolume, result, vessel_name='', save_dir='./', prec
             print('{} saved!'.format(vessel_name))
 
 
-# In[23]:
+# In[ ]:
 
 
 def load_mask(ct_dir, mask_dir=''):
@@ -2191,3 +2689,102 @@ def verify_npy(i):
     plt.show()
 
 # verify_npy(2)
+
+
+# In[ ]:
+
+
+def plot3d(*args, cont=False):
+    global fig, ax
+    if not cont:
+        fig = plt.figure(figsize=(8,8))
+        ax = Axes3D(fig)
+    for ps in args:
+        ax.scatter(*ps.T)
+    set_axes_equal(ax)
+    plt.show()
+
+
+# In[ ]:
+
+
+@njit
+def minmax(array):
+    # Ravel the array and return early if it's empty
+    array = array.ravel()
+    length = array.size
+    if not length:
+        return
+
+    # We want to process two elements at once so we need
+    # an even sized array, but we preprocess the first and
+    # start with the second element, so we want it "odd"
+    odd = length % 2
+    if not odd:
+        length -= 1
+
+    # Initialize min and max with the first item
+    minimum = maximum = array[0]
+
+    i = 1
+    while i < length:
+        # Get the next two items and swap them if necessary
+        x = array[i]
+        y = array[i+1]
+        if x > y:
+            x, y = y, x
+        # Compare the min with the smaller one and the max
+        # with the bigger one
+        minimum = min(x, minimum)
+        maximum = max(y, maximum)
+        i += 2
+
+    # If we had an even sized array we need to compare the
+    # one remaining item too.
+    if not odd:
+        x = array[length]
+        minimum = min(x, minimum)
+        maximum = max(x, maximum)
+
+    return minimum, maximum
+
+
+# In[ ]:
+
+
+def fill_lumen(wall_points, vessel_p, min_sp):
+    z_axis = vessel_p.vec_z
+    y_axis = vessel_p.vec_y
+    x_axis = vessel_p.vec_x
+    
+    axes = np.array([y_axis, x_axis]).T
+    
+    cp = vessel_p.center
+    rel_coord = np.matmul(wall_points - cp, axes) / min_sp
+    
+    rel_coord = np.floor(rel_coord+0.5).astype(np.int)
+#     cp_coord = np.floor(cp_coord+0.5).astype(np.int)
+    
+    min_x, max_x = minmax(rel_coord[:,1])
+    min_y, max_y = minmax(rel_coord[:,0])
+    
+    origin = np.array([min_y, min_x])
+    
+    rel_coord -= origin
+#     cp_coord -= origin
+    
+    shape = (max_y-min_y+1, max_x-min_x+1)
+    
+    arr = coo_matrix((np.repeat(1,rel_coord.shape[0]), rel_coord.T), shape=shape, dtype=np.int).toarray()
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+    try:
+        cv2.floodFill(arr, None, tuple(-origin), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+    except:
+        pass
+            
+    ret_coord = (np.array(np.where(arr>0)).T + origin) * min_sp
+#     
+    ret = np.matmul(ret_coord, np.linalg.pinv(axes)) + cp
+    
+    return ret
+
