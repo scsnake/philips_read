@@ -455,33 +455,45 @@ class CtVolume(object):
         # p = f.pixel_array
 
         data = np.zeros((len(dcm_files), f.Columns, f.Rows), np.int16)
-        spacing = np.array([f.SliceThickness, f.PixelSpacing[1], f.PixelSpacing[0]])
         
+        try:
+            spacing = np.array([f.SliceThickness, f.PixelSpacing[1], f.PixelSpacing[0]])
 
-        spacing = np.dot(spacing[::-1].reshape((1, 3)),
-                         np.append(np.array(f.ImageOrientationPatient), [0, 0, 1]).reshape((3, 3))).reshape(3)[::-1]
+
+            spacing = np.dot(spacing[::-1].reshape((1, 3)),
+                             np.append(np.array(f.ImageOrientationPatient), [0, 0, 1]).reshape((3, 3))).reshape(3)[::-1]
+            
+            if f[0x18, 0x5100][0:2]=='FF': # image position == feet first
+                spacing[0] = -spacing[0]
+        except:
+            spacing = np.array([1,1,1])
         
-        if f[0x18, 0x5100][0:2]=='FF': # image position == feet first
-            spacing[0] = -spacing[0]
+        
         
         tmp = {}
         origins = {}
         all_inst_no =[]
         for path in dcm_files:
-            f = dicom.read_file(path)
-            
-            p = f.pixel_array
-            inst_no = int(f.InstanceNumber)
-            all_inst_no.append(inst_no)
-#             data[inst_no - 1] = np.array(p)
-            tmp[inst_no] = np.array(p)
-            origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]   # image position
+            try:
+                f = dicom.read_file(path)
+
+                p = f.pixel_array
+                inst_no = int(f.InstanceNumber)
+                all_inst_no.append(inst_no)
+    #             data[inst_no - 1] = np.array(p)
+                tmp[inst_no] = np.array(p)
+                origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]   # image position
+            except:
+                pass
         
         for i, inst_no in enumerate(sorted(all_inst_no)):
             data[i,...] = tmp[inst_no]
         
             if i==0:
-                origin = origins[inst_no]
+                try:
+                    origin = origins[inst_no]
+                except:
+                    origin = np.array([0,0,0])
         
         del tmp
         
@@ -1172,87 +1184,3 @@ def reset():
         pass
 
 
-dataset_folder = ''  # dataset_folder/id/*.dcm
-dataset_csv = ''  # id,x,y,z in each line of csv
-dataset_coord_type = 'absolute'  # absolute or pixel
-output_dim = (64, 64, 64)
-
-
-def test():
-    d = CtVolume()
-    d.load_image_data(r'/data/LKDS/allset/LKDS-00024.mhd')
-    # pickle.dump(d, open('LKDS-00024-lung', 'wb'), pickle.HIGHEST_PROTOCOL)
-    # d = pickle.load(open('LKDS-00024-lung'))
-    ax, cor, sag = d.thick_recon()
-    # ViewCT(ax)
-    ViewCT(cor)
-    ViewCT(sag)
-
-
-if __name__ == '__main__':
-    test()
-    # nodule_files = glob.glob(os.path.join(r'/home/scsnake/Downloads/LSTK/', '*_outputROI.mhd'))
-    # for nd in nodule_files:
-    #     nd_name = os.path.basename(nd)
-    #     nd_id, _ = os.path.splitext(nd_name)
-    #     nd_id = nd_id[0:10]
-    #
-    #     n=sitk.GetArrayFromImage(sitk.ReadImage(nd))
-    #     m=sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(r'/home/scsnake/Downloads/LSTK/', nd_id + '_outputTumorImage.mha')))
-    #
-    #     s1=n.shape
-    #     s2=m.shape
-    #
-    #     if s1[1]==s2[1] and s1[2]==s2[2]:
-    #         continue
-    #     else:
-    #         print(s1)
-    #         print(s2)
-
-    # reset()
-    # start_time = time.time()
-    # data_prepare(r'/data/LKDS/allset/',
-    #              r'/data/LKDS/csv/annotations_all.csv',
-    #              r'/home/scsnake/Downloads/LSTK/',
-    #              r'./no_lung/',
-    #              r'./lung_no_nodule/',
-    #              r'./lung_nodule/',
-    #              100, 100, 100)
-    # print(time.time() - start_time)
-    # d = CtVolume()
-
-    # d.load_image_data(r'/data/LKDS/allset/LKDS-00024.mhd')
-    # d.load_lung_mask(r'./result/LKDS-00024_ma.mhd')
-    # ViewCT(d.masked_lung())
-    # d.load_nodule_info(r'/data/LKDS/csv/annotations_reviewed_sorted.csv')
-    # while 1:
-    #     crop = d.generate_negative_volume(output_dim)
-    #     if np.any(crop.lung_mask):
-    #         ViewCT(crop.apply_window(crop.masked_lung()))
-    # nd = Nodule(r'./LSTK/LKDS-00024_outputROI_ps.mhd',
-    #             r'./LSTK/LKDS-00024_outputTumorImage_ps.mha')
-    #
-    # pickle.dump(d, open('LKDS-00024-lung','w'), pickle.HIGHEST_PROTOCOL)
-    # pickle.dump(nd, open('LKDS-00024-nodule', 'w'), pickle.HIGHEST_PROTOCOL)
-    # d = pickle.load(open('LKDS-00024-lung'))
-    # nd = pickle.load(open('LKDS-00024-nodule'))
-
-    # ViewCT(nd.apply_window())
-    # ViewCT(nd.apply_window(nd.rotate_random()))
-    # d.load_itk(r'C:\LKDS\LKDS-00001.mhd')
-    # t = d.crop((200,200,200), (128, 128,128), 127)
-    # t = d.nodule_blender(nd)
-    # while 1:
-    #     crop = d.generate_negative_volume(output_dim)
-    #     t = nodule_blender(nd.noise_random(), crop)
-    #
-    #     # np.save('new.npy', t )
-    #     if t is not None:
-    #         ViewCT(t)
-
-    # plt.axis('off')
-    # for i in range(16):
-    #     plt.subplot(4, 4, i + 1)
-    #     plt.imshow(t[int(t.shape[0] *1.0/ 16 * i)], cmap='gray')
-    #
-    # plt.show()
