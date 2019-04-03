@@ -3,8 +3,11 @@
 
 # In[1]:
 
+
 from numba import jit, njit
-from time import time
+import pixiedust
+
+from time import time,sleep
 from helper import ViewCT, CtVolume, groupedAvg
 from scipy.ndimage.morphology import binary_fill_holes
 from scipy.ndimage import map_coordinates, convolve
@@ -30,6 +33,7 @@ from functools import reduce
 from collections import OrderedDict, namedtuple
 import random
 import struct
+import inspect
 # import sparse
 # from nbmultitask import ProcessWithLogAndControls
 
@@ -1089,7 +1093,9 @@ class Coronary:
         self.total_len = self.center_line.total_len
 #         self.center_points = center_points
 
+    
     def center_vec(self, u):
+        return
         if u == 1:
             return self.center_points[-1]
 
@@ -1212,21 +1218,35 @@ class Coronary:
 
     @lazy_property
     def inner_wall_abs_spl(self):
-        return self._wall_spl('inner', 'abs')
+        return self._wall_spl(inspect.currentframe().f_code.co_name)
 
     @lazy_property
     def inner_wall_rel_spl(self):
-        return self._wall_spl('inner', 'rel')
+        return self._wall_spl(inspect.currentframe().f_code.co_name)
 
     @lazy_property
     def outer_wall_abs_spl(self):
-        return self._wall_spl('outer', 'abs')
+        return self._wall_spl(inspect.currentframe().f_code.co_name)
 
     @lazy_property
     def outer_wall_rel_spl(self):
-        return self._wall_spl('outer', 'rel')
+        return self._wall_spl(inspect.currentframe().f_code.co_name)
+    
+    @property
+    def inner_wall_abs_spl_u0(self):
+        return self._wall_spl_u0(inspect.currentframe().f_code.co_name)
+    @property
+    def inner_wall_rel_spl_u0(self):
+        return self._wall_spl_u0(inspect.currentframe().f_code.co_name)
+    @property
+    def outer_wall_abs_spl_u0(self):
+        return self._wall_spl_u0(inspect.currentframe().f_code.co_name)
+    @property
+    def outer_wall_rel_spl_u0(self):
+        return self._wall_spl_u0(inspect.currentframe().f_code.co_name)
 
-    def _wall_spl(self, in_or_out, abs_or_rel):
+    def _wall_spl(self, func_name):
+        in_or_out, abs_or_rel = func_name[0:5], func_name[11:14]
         coords = getattr(
             self, '{}_wall_{}_coords'.format(in_or_out, abs_or_rel))
         ret = []
@@ -1238,10 +1258,17 @@ class Coronary:
                 ret2.append(spl.intersect_u(cp[0], cp[2]))
             else:
                 ret2.append(spl.intersect_u(np.array([0,0]), np.array([0,1])))
-        setattr(self, '{}_wall_{}_spl_u0'.format(in_or_out, abs_or_rel), ret2)
+        setattr(self, '_{}_wall_{}_spl_u0'.format(in_or_out, abs_or_rel), ret2)
         return ret
+    
+    def _wall_spl_u0(self, func_name):
+        in_or_out, abs_or_rel = func_name[0:5], func_name[11:14]
+        if not hasattr(self, '_{}_wall_{}_spl_u0'.format(in_or_out, abs_or_rel)):
+            getattr(self, '{}_wall_{}_spl'.format(in_or_out, abs_or_rel))
+        return getattr(self, '_{}_wall_{}_spl_u0'.format(in_or_out, abs_or_rel))
+        
 
-    def upsample_sections(self, upsample_ratio=1, xy_samples=1000):
+    def upsample_sections(self, upsample_ratio=1, xy_samples=100):
 
         for i, ((u0, u1), 
                 (cp0, cp1), 
@@ -1261,49 +1288,64 @@ class Coronary:
             center0, vec_z0, vec_y0 = cp0
             vec_z0 = normalized(vec_z0)
             vec_y0 = normalized(vec_y0)
-
-            yield vessel_p(center0, vec_z0, vec_y0, normalized(np.cross(vec_y0, vec_z0)), in0, ou0)
+            vec_x0 = normalized(np.cross(vec_y0, vec_z0))
+            
+            rel_coord_in0 = rel_in0.spline(np.mod(np.linspace(0,1,xy_samples) + in_u0,1.0)) 
+            abs_coord_in0 = coord_rel_to_abs(rel_coord_in0, center0, vec_y0, vec_x0, scale=0.5)
+            rel_coord_ou0 = rel_ou0.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u0,1.0)) 
+            abs_coord_ou0 = coord_rel_to_abs(rel_coord_ou0, center0, vec_y0, vec_x0, scale=0.5)
+            
+            
+            yield vessel_p(center0, vec_z0, vec_y0, vec_x0, BSpline3D(abs_coord_in0, simple_init=True, periodic=True), 
+                              BSpline3D(abs_coord_ou0, simple_init=True, periodic=True))
 
             center1, vec_z1, vec_y1 = cp1
             vec_z1 = normalized(vec_z1)
             vec_y1 = normalized(vec_y1)
+            vec_x1 = normalized(np.cross(vec_y1, vec_z1))
             
-            rel_coord_in0 = rel_in0.spline(np.mod(np.linspace(0,1,xy_samples) + in_u0,1.0)) 
             rel_coord_in1 = rel_in1.spline(np.mod(np.linspace(0,1,xy_samples) + in_u1,1.0)) 
-            rel_coord_ou0 = rel_ou0.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u0,1.0)) 
             rel_coord_ou1 = rel_ou1.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u1,1.0)) 
 
             for j in range(1, upsample_ratio):
-                u = (j*u0+(upsample_ratio-j)*u1)/upsample_ratio
+                u = (j*u1+(upsample_ratio-j)*u0)/upsample_ratio
 
                 cp = self.center_line.spline(u)
+#                 cp = ((u1-u)*center0+(u-u0)*center1)/(u1-u0)
 
 #                 vec_z = normalized(self.center_line.drv1(u))
 
 #                 if np.dot(vec_z, ((u-u1)*vec_z0+(u-u0)*vec_z1)/(u1-u0)) < 0:
 #                     vec_z *= -1
-                vec_z = ((u1-u)*vec_z0+(u-u0)*vec_z1)/(u1-u0)
+#                 vec_z = normalized(((u1-u)*vec_z0+(u-u0)*vec_z1)/(u1-u0))
+                vec_z = normalized(self.center_line.vec_z_spline(u))
 
-                vec_y = self.center_line.vec_y_spline(u) - cp
-                vec_y = normalized(vec_y-projection(vec_y, vec_z))
+#                 vec_y = self.center_line.vec_y_spline(u) - cp
 
-                if np.dot(vec_y, ((u1-u)*vec_y0+(u-u0)*vec_y1)/(u1-u0)) < 0:
+#                 vec_y_ = normalized(((u1-u)*vec_y0+(u-u0)*vec_y1)/(u1-u0))
+                vec_y_ = normalized(self.center_line.vec_y_spline(u))
+                vec_y = normalized(vec_y_-projection(vec_y_, vec_z))
+
+                if np.dot(vec_y, vec_y_) < 0:
                     vec_y *= -1
 
                 vec_x = normalized(np.cross(vec_y, vec_z))
                 
-                rel_coord_in = (j*rel_coord_in0+(upsample_ratio-j)*rel_coord_in1)/upsample_ratio
+                rel_coord_in = (j*rel_coord_in1+(upsample_ratio-j)*rel_coord_in0)/upsample_ratio
                 abs_coord_in = coord_rel_to_abs(rel_coord_in, cp, vec_y, vec_x, scale=0.5)
                 
-                rel_coord_out = (j*rel_coord_ou0+(upsample_ratio-j)*rel_coord_ou1)/upsample_ratio
-                abs_coord_out = coord_rel_to_abs(rel_coord_out, cp, vec_y, vec_x, scale=0.5)
+                rel_coord_ou = (j*rel_coord_ou1+(upsample_ratio-j)*rel_coord_ou0)/upsample_ratio
+                abs_coord_ou = coord_rel_to_abs(rel_coord_ou, cp, vec_y, vec_x, scale=0.5)
                 
                 
                 
                 yield vessel_p(cp, vec_z, vec_y, vec_x, BSpline3D(abs_coord_in, simple_init=True, periodic=True), 
-                              BSpline3D(abs_coord_out, simple_init=True, periodic=True))
+                              BSpline3D(abs_coord_ou, simple_init=True, periodic=True))
         else:
-            yield vessel_p(center1, vec_z1, normalized(vec_y1), normalized(np.cross(vec_y1, vec_z1)), in1, ou1)
+            abs_coord_in1 = coord_rel_to_abs(rel_coord_in1, center1, vec_y1, vec_x1, scale=0.5)
+            abs_coord_ou1 = coord_rel_to_abs(rel_coord_ou1, center1, vec_y1, vec_x1, scale=0.5)
+            yield vessel_p(center1, vec_z1, vec_y1, vec_x1, BSpline3D(abs_coord_in1, simple_init=True, periodic=True), 
+                              BSpline3D(abs_coord_ou1, simple_init=True, periodic=True))
 
 
 #     def section(self, u):
@@ -1418,12 +1460,12 @@ class BSpline3D:
         #         else:
         self.spline, self.tck, self.u = self.init_spline(
             points[:, 0:3], per=periodic)
-#         if points.shape[1] > 3:
-#             self.vector1_spline, _, _ = self.init_spline(
-#                 points[:, 0:3] + points[:, 3:6], per=periodic)
+        if points.shape[1] > 3:
+            self.vec_z_spline, _, _ = self.init_spline(
+                points[:, 3:6], per=periodic)
         if points.shape[1] > 6:
             self.vec_y_spline, _, _ = self.init_spline(
-                points[:, 0:3] + points[:, 6:9], per=periodic)
+                points[:, 6:9], per=periodic)
         
         
         self.points = points
@@ -1567,7 +1609,7 @@ class BSpline3D:
 #         print(loop_i)
         return ret
 
-    def intersect_u(self, start_p, vector, return_coord=False, threshold=1e-5, max_iter=1000):
+    def intersect_u(self, start_p, vector, return_coord=False, threshold=1e-9, max_iter=1000):
         '''
         for closed B-spline, find the intersection with the vector start from start_p, return coresponding u or coord
         '''
@@ -1592,6 +1634,7 @@ class BSpline3D:
             elif 1-a2 < threshold:
                 ret = u2
                 break
+            
 
             u_ = (u1+u2)/2
             v_ = normalized(self.spline(u_)-start_p)
@@ -1599,7 +1642,7 @@ class BSpline3D:
             i1 = np.dot(target, self.spline((u_+u1)/2)-start_p)
             i2 = np.dot(target, self.spline((u_+u2)/2)-start_p)
 
-            if abs(i1-i2) < 1e-13:
+            if abs(i1-i2) < threshold:
                 ret = u_
                 break
             elif i1 > i2:
@@ -1611,7 +1654,7 @@ class BSpline3D:
 
         return ret if not return_coord else self.spline(ret)
     
-    def intersect_plane(self, start_u_range, center_point, normal_vec_of_plane, return_coord=False, threshold = 1e-5, max_iter=1000):
+    def intersect_plane(self, start_u_range, center_point, normal_vec_of_plane, return_coord=False, threshold = 1e-9, max_iter=1000):
         u0,u1 = min(start_u_range), max(start_u_range)
         
         vec_z = normalized(normal_vec_of_plane)
@@ -1979,9 +2022,7 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
         if np.amax(precision) > 1:
             ret = groupedAvg(ret, precision, axis=(1, 2))
             if outer_wall:
-                ret2 = groupedAvg(ret2, precision, axis=(1, 2))
-
-
+                ret2 = groupedAvg(ret2, precision, axis=(1,2))
             
         
 #     for coor in result_coord:
@@ -2696,15 +2737,15 @@ def verify_npy(i):
 # In[ ]:
 
 
-def plot3d(*args, cont=False):
-    global fig, ax
+def plot3d(*args, cont=False, **kwargs):
+    global fig, ax, plt
     if not cont:
         fig = plt.figure(figsize=(8,8))
         ax = Axes3D(fig)
     for ps in args:
-        ax.scatter(*ps.T)
+        ax.scatter(*ps.T, **kwargs)
     set_axes_equal(ax)
-    plt.show()
+#     plt.show()
 
 
 # In[ ]:
