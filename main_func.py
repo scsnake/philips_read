@@ -1978,7 +1978,9 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
     #         precision, 0, 1, axis=0), result_coord, _t)
         if np.amax(precision) > 1:
             ret = groupedAvg(ret, precision, axis=(1, 2))
-            ret2 = groupedAvg(ret2, precision, axis=(1, 2))
+            if outer_wall:
+                ret2 = groupedAvg(ret2, precision, axis=(1, 2))
+
 
             
         
