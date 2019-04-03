@@ -1,12 +1,4 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 from numba import jit, njit
-import pixiedust
-
 from time import time,sleep
 from helper import ViewCT, CtVolume, groupedAvg
 from scipy.ndimage.morphology import binary_fill_holes
@@ -36,6 +28,7 @@ import struct
 import inspect
 # import sparse
 # from nbmultitask import ProcessWithLogAndControls
+
 
 # from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
@@ -2238,7 +2231,7 @@ def generate_mask(coronary, ctVolume, precision=(1, 1, 1), out=None, no_fill=Fal
         result_coord = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
 #             for i, u in enumerate(np.linspace(0, 1, 4*n1)):
-            for i, vessel_p in enumerate(coronary.upsample_sections(n1)):
+            for i, vessel_p in enumerate(coronary.upsample_sections(10)):
 #                 center_vec = coronary.center_line.center_vec(u)
                 
 #                 section_points0 = np.array(coronary.BSplineSurfacePoint(u))
@@ -2567,8 +2560,8 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
     for vessel_name, res in res_data.items():
         if not 'inner_wall' in res:
             continue
-        cor = Coronary(res)
-        mask = generate_mask(cor, ctVolume, precision=(3, 2, 2))
+        cor = Coronary(res, cp_offset = abs(ctVolume.spacing)/2)
+        mask = generate_mask(cor, ctVolume, precision=(4, 4, 4))
         path = save_dir.joinpath(vessel_name+'_mask.npy')
         if np.isnan(mask).any():
             print('Nan noted, {} not saved!'.format(str(path.resolve())))
@@ -2579,7 +2572,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
             np.save(str(path1.resolve()), mask)
 
         s_mask, s_mpr = straighten_data_mask(
-            ctVolume, cor, output_dim=(200, 200), precision=(2, 2), output_spacing=0.1)
+            ctVolume, cor, output_dim=(200, 200), precision=(4, 4), output_spacing=0.1, upsample_z=2)
         if np.isnan(s_mask).any():
             print('Nan noted, {} not saved!'.format(str(path2.resolve())))
         else:
