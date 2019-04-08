@@ -1,4 +1,7 @@
+# coding: utf-8
+
 from numba import jit, njit
+
 from time import time,sleep
 from helper import ViewCT, CtVolume, groupedAvg
 from scipy.ndimage.morphology import binary_fill_holes
@@ -28,7 +31,6 @@ import struct
 import inspect
 # import sparse
 # from nbmultitask import ProcessWithLogAndControls
-
 
 # from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
@@ -1210,6 +1212,28 @@ class Coronary:
                                  for i in range(self.section_points.shape[1])]
 
     @lazy_property
+    def inner_wall_rel_spl_lon(self):
+        return self._wall_spl_lon(inspect.currentframe().f_code.co_name)
+    @lazy_property
+    def outer_wall_rel_spl_lon(self):
+        return self._wall_spl_lon(inspect.currentframe().f_code.co_name)
+    
+    def _wall_spl_lon(self, func_name):
+        in_or_out, abs_or_rel = func_name[0:5], func_name[11:14]
+        ret = []
+        wall_points = []
+        for spl,u0 in zip(getattr(self, '{}_wall_rel_spl'.format(in_or_out)),
+                          getattr(self, '{}_wall_rel_spl_u0'.format(in_or_out))):
+            p=[]
+            for i in np.linspace(0,1,100)[:-1]:
+                p.append(np.insert(spl.spline(np.mod(i+u0,1.0)),0,i))
+            wall_points.append(p)
+        wall_points = np.array(wall_points)
+        for i in range(wall_points.shape[1]):
+            ret.append(BSpline3D(wall_points[:,i,:], simple_init=True))
+        return ret
+    
+    @lazy_property
     def inner_wall_abs_spl(self):
         return self._wall_spl(inspect.currentframe().f_code.co_name)
 
@@ -1283,9 +1307,9 @@ class Coronary:
             vec_y0 = normalized(vec_y0)
             vec_x0 = normalized(np.cross(vec_y0, vec_z0))
             
-            rel_coord_in0 = rel_in0.spline(np.mod(np.linspace(0,1,xy_samples) + in_u0,1.0)) 
+            rel_coord_in0 = rel_in0.spline(np.mod(np.linspace(0,1,xy_samples)[:-1] + in_u0,1.0)) 
             abs_coord_in0 = coord_rel_to_abs(rel_coord_in0, center0, vec_y0, vec_x0, scale=0.5)
-            rel_coord_ou0 = rel_ou0.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u0,1.0)) 
+            rel_coord_ou0 = rel_ou0.spline(np.mod(np.linspace(0,1,xy_samples)[:-1] + ou_u0,1.0)) 
             abs_coord_ou0 = coord_rel_to_abs(rel_coord_ou0, center0, vec_y0, vec_x0, scale=0.5)
             
             
@@ -1297,8 +1321,8 @@ class Coronary:
             vec_y1 = normalized(vec_y1)
             vec_x1 = normalized(np.cross(vec_y1, vec_z1))
             
-            rel_coord_in1 = rel_in1.spline(np.mod(np.linspace(0,1,xy_samples) + in_u1,1.0)) 
-            rel_coord_ou1 = rel_ou1.spline(np.mod(np.linspace(0,1,xy_samples) + ou_u1,1.0)) 
+            rel_coord_in1 = rel_in1.spline(np.mod(np.linspace(0,1,xy_samples)[:-1] + in_u1,1.0)) 
+            rel_coord_ou1 = rel_ou1.spline(np.mod(np.linspace(0,1,xy_samples)[:-1] + ou_u1,1.0)) 
 
             for j in range(1, upsample_ratio):
                 u = (j*u1+(upsample_ratio-j)*u0)/upsample_ratio
@@ -1324,10 +1348,12 @@ class Coronary:
 
                 vec_x = normalized(np.cross(vec_y, vec_z))
                 
-                rel_coord_in = (j*rel_coord_in1+(upsample_ratio-j)*rel_coord_in0)/upsample_ratio
+#                 rel_coord_in = (j*rel_coord_in1+(upsample_ratio-j)*rel_coord_in0)/upsample_ratio
+                rel_coord_in = np.array([spl.spline(u) for spl in self.inner_wall_rel_spl_lon])[:,1:3]
                 abs_coord_in = coord_rel_to_abs(rel_coord_in, cp, vec_y, vec_x, scale=0.5)
                 
-                rel_coord_ou = (j*rel_coord_ou1+(upsample_ratio-j)*rel_coord_ou0)/upsample_ratio
+#                 rel_coord_ou = (j*rel_coord_ou1+(upsample_ratio-j)*rel_coord_ou0)/upsample_ratio
+                rel_coord_ou = np.array([spl.spline(u) for spl in self.outer_wall_rel_spl_lon])[:,1:3]
                 abs_coord_ou = coord_rel_to_abs(rel_coord_ou, cp, vec_y, vec_x, scale=0.5)
                 
                 
@@ -2727,7 +2753,7 @@ def verify_npy(i):
 # verify_npy(2)
 
 
-# In[ ]:
+# In[1]:
 
 
 def plot3d(*args, cont=False, **kwargs):
@@ -2738,7 +2764,7 @@ def plot3d(*args, cont=False, **kwargs):
     for ps in args:
         ax.scatter(*ps.T, **kwargs)
     set_axes_equal(ax)
-#     plt.show()
+    plt.show()
 
 
 # In[ ]:
