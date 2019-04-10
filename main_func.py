@@ -32,6 +32,7 @@ import inspect
 # import sparse
 # from nbmultitask import ProcessWithLogAndControls
 
+
 # from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
 np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
@@ -1028,6 +1029,10 @@ def coord_rel_to_abs(coords, center, vec_y, vec_x, scale=1.0):
 def coord_abs_to_rel(coords, center, vec_y, vec_x, scale=1.0):
     return np.matmul(coords - center, np.array([vec_y, vec_x]).T) / scale
 
+def counterclockwise_order(points, vec_z):
+        vec1 = points[1]-points[0]
+        vec2 = points[2] - points[1]
+        return np.dot(np.cross(vec1,vec2), vec_z)>0
 
 def lazy_property(fn):
     '''Decorator that makes a property lazy-evaluated.
@@ -1043,24 +1048,30 @@ def lazy_property(fn):
 
 
 class Coronary:
-    def __init__(self, result, n_per_section=100, flip_xz=True, guess_orifice=False, cp_offset=(0, 0, 0)):
+    def __init__(self, result, n_per_section=100, flip_xz=True, cp_offset=(0, 0, 0), fix_orifice=None):
         center_points = result['center_points'].copy()
         inner_wall_rel_coords = result['inner_wall'].copy()
         outer_wall_rel_coords = result['outer_wall'].copy()
 
 #         self.oct_section_points = oct_section_points.ravel().reshape(-1, 8, 3)
         self.center_points = center_points.reshape(-1, 3, 3)
-        self.center_points[:, 0, :] += nparr(cp_offset)
         self.inner_wall_rel_coords = inner_wall_rel_coords
         self.outer_wall_rel_coords = outer_wall_rel_coords
-
+        
+        self.cp_offset = cp_offset
+        
         if flip_xz:
+            self.flip_xz=True
             #             self.oct_section_points = np.flip(self.oct_section_points, axis=2)
             self.inner_wall_rel_coords = np.flip(
                 self.inner_wall_rel_coords, axis=1)
             self.outer_wall_rel_coords = np.flip(
                 self.outer_wall_rel_coords, axis=1)
             self.center_points = np.flip(self.center_points, axis=2)
+        else:
+            self.flip_xz=False
+            
+        self.center_points[:, 0, :] += nparr(cp_offset)
 
         # normal vector from center_points is not extactly on oct_ponits' plane
 #         if fix:
@@ -1076,10 +1087,12 @@ class Coronary:
 #                     cps[2] - projection(cps[2], fixed_tangent))
 #                 self.center_points[i, 2, :] = fixed_normal
 
+        
+    
         self.convertInnerWallPoints(result)
 
-        if guess_orifice:
-            self.guess_orifice()
+        if fix_orifice:
+            self.fix_orifice(fix_orifice)
 
 #         if n_per_section:
 #             self.resample_section(n_per_section=n_per_section)
@@ -1087,8 +1100,47 @@ class Coronary:
         self.center_line = BSpline3D(self.center_points.reshape(-1, 9))
         self.total_len = self.center_line.total_len
 #         self.center_points = center_points
-
-    
+    def fix_orifice(self, all_results):
+        cp_LAD = all_results['LAD']['center_points'].copy()
+        cp_RCA = all_results['RCA']['center_points'].copy()
+        
+        cp_LAD=cp_LAD.reshape(-1, 3, 3)
+        cp_RCA=cp_RCA.reshape(-1, 3, 3)
+        
+        if self.flip_xz:
+            cp_LAD = np.flip(cp_LAD,axis=2)
+            cp_RCA = np.flip(cp_RCA,axis=2)
+        
+        cp_LAD[:, 0, :] += nparr(self.cp_offset)
+        cp_RCA[:, 0, :] += nparr(self.cp_offset)
+        
+        # sum distance for first 20 points
+        n=20
+        self_cp = self.center_points[0:n,0]
+        ds_LAD = np.sum(np.linalg.norm(cp_LAD[0:n,0]-self_cp, axis=1))
+        ds_RCA = np.sum(np.linalg.norm(cp_RCA[0:n,0]-self_cp, axis=1))
+        
+        orifice = cp_LAD[0] if ds_LAD<ds_RCA else cp_RCA[0]
+        
+        vec_z = orifice[1]
+        cp = orifice[0]
+        c = np.dot(vec_z, cp)
+        
+        sign0 = np.sign(np.dot(vec_z, self_cp[0]) - c)
+        for i, p in enumerate(self.center_points[1:,0]):
+            if np.sign(np.dot(vec_z,p) -c) != sign0:
+                break
+            if i>100:
+                return
+        
+        i+=1
+        self.center_points = self.center_points[i:]
+        self.inner_wall_abs_coords = self.inner_wall_abs_coords[i:]
+        self.inner_wall_rel_coords = self.inner_wall_rel_coords[i:]
+        self.outer_wall_abs_coords = self.outer_wall_abs_coords[i:]
+        self.outer_wall_rel_coords = self.outer_wall_rel_coords[i:]
+        
+            
     def center_vec(self, u):
         return
         if u == 1:
@@ -1133,6 +1185,8 @@ class Coronary:
         last_ind = 0
         last_ind2 = 0
         scale = 0.5
+        reverse_order = False
+        
         for i, (p_count, p_count2, cp) in enumerate(zip(point_count, point_count2, self.center_points)):
             rel_coor = points_rel_coor[(last_ind):(last_ind+p_count)]
             rel_coor[:, 1] *= -1
@@ -1150,6 +1204,7 @@ class Coronary:
 #             abs_coor = np.matmul(rel_coor, np.array([vec1, vec2])) + center
 
             # if two succesive points are identical, spline fit show error
+    
             diff_zero = np.where(
                 np.max(np.abs(np.diff(rel_coor, axis=0)), axis=1) < 1e-9)[0]
             if diff_zero.size:
@@ -1160,10 +1215,14 @@ class Coronary:
                 np.max(np.abs(np.diff(rel_coor2, axis=0)), axis=1) < 1e-9)[0]
             if diff_zero.size:
                 rel_coor2 = np.delete(rel_coor2, diff_zero, axis=0)
-
+                
             abs_coor = np.matmul(rel_coor, np.linalg.pinv(
                 np.array([vec_y, vec_x])).T) * scale + center
-
+            
+            if not counterclockwise_order(abs_coor, vec_z):
+                abs_coor=abs_coor[::-1, ...]
+                rel_coor=rel_coor[::-1, ...]
+            
             ret.append(abs_coor)
             ret2.append(rel_coor)
 
@@ -1171,7 +1230,9 @@ class Coronary:
 
             abs_coor2 = np.matmul(rel_coor2, np.linalg.pinv(
                 np.array([vec_y, vec_x])).T) * scale + center
-
+            if not counterclockwise_order(abs_coor2, vec_z):
+                abs_coor2=abs_coor2[::-1, ...]
+                rel_coor2=rel_coor2[::-1, ...]
             ret3.append(abs_coor2)
             ret4.append(rel_coor2)
 
@@ -1187,6 +1248,8 @@ class Coronary:
 #         self._outer_wall_abs_spl = None
 #         self._outer_wall_rel_spl = None
 
+    
+        
     def resample_section(self, n_per_section=100):
         #         with concurrent.futures.ProcessPoolExecutor(
         #                 max_workers=16) as executor:
@@ -1912,7 +1975,7 @@ def plots(data, **kwargs):
 # In[3]:
 
 
-def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None, upsample_z=1, no_fill=False, outer_wall=False):
+def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None, upsample_z=1, average_z=False, no_fill=False, outer_wall=False):
     def set_mask(point_coord):
         vec = point_coord - cp
         y = np.dot(vec, y_axis)
@@ -2042,7 +2105,13 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
             ret = groupedAvg(ret, precision, axis=(1, 2))
             if outer_wall:
                 ret2 = groupedAvg(ret2, precision, axis=(1,2))
+        
+        if average_z and upsample_z>1:
+            ret = np.vstack(([ret[0]], groupedAvg(ret[1:], (upsample_z, ), axis=(0, ))))
+            cmpr = np.vstack(([cmpr[0]], groupedAvg(cmpr[1:], (upsample_z, ), axis=(0, ))))
             
+            if outer_wall:
+                ret2 = np.vstack(([ret2[0]], groupedAvg(ret2[1:], (upsample_z, ), axis=(0, ))))
         
 #     for coor in result_coord:
 #         coor = np.floor(np.array(coor) + 0.5).astype(np.int)
@@ -2586,7 +2655,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
     for vessel_name, res in res_data.items():
         if not 'inner_wall' in res:
             continue
-        cor = Coronary(res, cp_offset = abs(ctVolume.spacing)/2)
+        cor = Coronary(res, cp_offset = abs(ctVolume.spacing)/2, fix_orifice=result)
         mask = generate_mask(cor, ctVolume, precision=(4, 4, 4))
         path = save_dir.joinpath(vessel_name+'_mask.npy')
         if np.isnan(mask).any():
@@ -2598,7 +2667,7 @@ def save_mask(ctVolume, result, vessel_name='', save_dir='./'):
             np.save(str(path1.resolve()), mask)
 
         s_mask, s_mpr = straighten_data_mask(
-            ctVolume, cor, output_dim=(200, 200), precision=(4, 4), output_spacing=0.1, upsample_z=2)
+            ctVolume, cor, output_dim=(200, 200), precision=(4, 4), output_spacing=0.1, upsample_z=4, average_z=True)
         if np.isnan(s_mask).any():
             print('Nan noted, {} not saved!'.format(str(path2.resolve())))
         else:
@@ -2849,4 +2918,5 @@ def fill_lumen(wall_points, vessel_p, min_sp):
     ret = np.matmul(ret_coord, np.linalg.pinv(axes)) + cp
     
     return ret
+
 
