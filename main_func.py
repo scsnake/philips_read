@@ -1,5 +1,8 @@
 # coding: utf-8
 
+# In[1]:
+
+
 from numba import jit, njit
 
 from time import time,sleep
@@ -29,11 +32,7 @@ from collections import OrderedDict, namedtuple
 import random
 import struct
 import inspect
-# import sparse
-# from nbmultitask import ProcessWithLogAndControls
 
-
-# from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
 np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
 
@@ -1972,7 +1971,7 @@ def plots(data, **kwargs):
     plt.tight_layout()
 
 
-# In[3]:
+# In[2]:
 
 
 def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0), output_dim=(100, 100), output_spacing=None, upsample_z=1, average_z=False, no_fill=False, outer_wall=False):
@@ -2013,9 +2012,12 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
 #         ret[i,...]=plane
 
     # abs coords conversion
-
+    
+    
     results = {}
+    not_filled=[]
     results2 = {}
+    not_filled2=[]
     point_count = cor.center_points.shape[0]
     ret = np.zeros((point_count + (point_count-1)*(upsample_z-1), new_dim[0], new_dim[1]))
     
@@ -2072,6 +2074,7 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
     with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
         #         for z, (center_point, spl) in enumerate(zip(cor.center_points, cor.section_spl)):
         for z, vessel_p in enumerate(vessel_ps):
+#         for z, vessel_p in enumerate(vessel_ps[679:681]):
             #         plane = np.empty(new_dim)
 
             #         u0 = spl.intersect_u(cp, center_point[2])
@@ -2079,12 +2082,15 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
             results[executor.submit(straighten_sub, vessel_p, vessel_p.inner_wall, precision,
                                     output_spacing, center_ind, new_dim, z, min_sp, no_fill)] = z
              
-#             results[z] = straighten_sub(vessel_p, vessel_p.inner_wall, precision, output_spacing, center_ind, new_dim, z, min_sp)
+#             results[z] = straighten_sub(vessel_p, vessel_p.inner_wall, precision, output_spacing, center_ind, new_dim, z, min_sp, no_fill)
 #             break
 
         for fs in concurrent.futures.as_completed(results):
             z = results[fs]
-            ret[z, ...] = fs.result()
+            res, is_filled = fs.result()
+            ret[z, ...] = res
+            if not is_filled:
+                not_filled.append(z)
         
         if outer_wall:
             ret2 = np.zeros((point_count + (point_count-1)*(upsample_z-1), new_dim[0], new_dim[1]))
@@ -2094,9 +2100,15 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
                                         output_spacing, center_ind, new_dim, z, min_sp, no_fill)] = z
             for fs in concurrent.futures.as_completed(results2):
                 z = results2[fs]
-                ret2[z, ...] = fs.result()
-
-
+                res, is_filled = fs.result()
+                ret2[z, ...] = res
+                if not is_filled:
+                    not_filled2.append(z)
+        
+        if not no_fill:
+            filling_from_corner(ret, not_filled)
+            if outer_wall:
+                filling_from_corner(ret2, not_filled2)
         print(time()-_t)
         _t = time()
     #     ret = output_mask((cor.center_points.shape[0], output_dim[0], output_dim[1]), np.insert(
@@ -2129,6 +2141,44 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
     else:
         return ret, cmpr
 
+def consecutive_number_ranges(nums):
+    ### https://stackoverflow.com/questions/2361945/detecting-consecutive-integers-in-a-list
+    nums = sorted(set(nums))
+    gaps = [[s, e] for s, e in zip(nums, nums[1:]) if s+1 < e]
+    edges = iter(nums[:1] + sum(gaps, []) + nums[-1:])
+    return list(zip(edges, edges))
+    
+def filling_from_corner(mask, z):
+    if not z:
+        return 
+    
+    for s, e in consecutive_number_ranges(z):
+        votes=np.zeros((2,2),dtype=np.int)
+        for i in (s-1, e+1):
+            try:
+                plane = mask[i]
+                for j, y in enumerate((0, plane.shape[0]-1)):
+                    for k, x in enumerate((0, plane.shape[1]-1)):
+                        votes[j,k]+=(1-plane[y,x])
+            except:
+                pass
+        
+        ## fill background
+        max_v = np.amax(votes)
+        i, j = np.where(votes==max_v)
+        seed_options = ((0, plane.shape[0]-1),(0, plane.shape[1]-1))
+        for k in range(s,e+1):
+            bg = mask[k].copy()
+            bg = np.ascontiguousarray(bg, dtype=np.uint8)
+            for seed_i, seed_j in zip(i,j):
+                seed = tuple((seed_options[0][seed_i], seed_options[1][seed_j]))
+                try:
+                    cv2.floodFill(bg, None, tuple(seed), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+                except:
+                    print('Flood fill failed at plane #{}'.format(k))
+                    continue
+            mask[k] += (1-bg)
+
 
 def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim, z, min_sp, no_fill):
 
@@ -2158,7 +2208,8 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
 #                    center_ind, axes, new_dim, z)
 #     plot3d(vessel_p.wall_points)
     rel_coord = np.matmul(section_points-cp, axes) / min_sp + center_ind
-
+#     rel_coord_copy = rel_coord.copy()
+    
     rel_coord = np.floor(rel_coord+0.5).astype(np.int)
 
     min_x, max_x = minmax(rel_coord[:, 1])
@@ -2169,6 +2220,8 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
 #     print(rel_coord, origin)
     
     rel_coord -= origin
+#     rel_coord_copy-=origin
+    center_ind-=origin
 
     shape = (max_y-min_y+1, max_x-min_x+1)
     
@@ -2177,16 +2230,50 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
     arr = coo_matrix((np.repeat(
         1, rel_coord.shape[0]), rel_coord.T), shape=shape, dtype=np.int).toarray()
     arr = np.ascontiguousarray(arr, dtype=np.uint8)
+    seed_on_boundary = False
+    cv_floodfill_error=False
     if not no_fill:
         
 
     #     print(rel_coord)
-
+        seed = np.floor(
+                center_ind+0.5).astype(np.int)
+        seed_on_boundary = False
+        for p in rel_coord:
+            if np.all(seed==p):
+                seed_on_boundary=True
+                break
+                
+        
+        
         try:
-            cv2.floodFill(arr, None, tuple(np.floor(
-                center_ind-origin+0.5).astype(np.int)), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+            cv2.floodFill(arr, None, tuple(seed), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
         except:
-            pass
+            cv_floodfill_error=True
+#             pass
+#             closest_ds = np.amin(np.abs(rel_coord_copy - center_ind+origin))
+#             except:
+#                 print(np.floor(
+#                     center_ind-origin+0.5).astype(np.int), arr.shape)
+#             found=False
+#             for i, point0 in enumerate(rel_coord_copy[:-1]):
+#                 for p in rel_coord_copy[i+1:]:
+#                     try:
+#                         cv2.floodFill(arr, None, tuple(np.floor(
+#                             (point0+p)/2+0.5).astype(np.int)), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+#                         found=True
+#                     except:
+#                         pass
+#                 if found:
+#                     break
+#             del arr
+#             del rel_coord
+#             del rel_coord_copy
+#             del section_points
+#             ratio = np.ceil(1/closest_ds)
+#             ret = straighten_sub(vessel_p, spl, precision, output_spacing/ratio, center_ind*ratio, new_dim*ratio, z, min_sp/ratio, no_fill)
+            
+#             return groupedAvg(ret, (2,2), axis=(0,1))
 
     ret = np.zeros(new_dim)
     ret_coord = np.array(np.where(arr > 0)).T + origin
@@ -2203,7 +2290,7 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
     
     
 #     plt.imshow(ret, cmap = 'gray')
-    return ret
+    return (ret, not (cv_floodfill_error or seed_on_boundary))
 
     for p in section_points:
         #             sp.append(p)
@@ -2261,6 +2348,12 @@ def plot_sec(ct, cor, n):
     plt.show()
 
 # plot_sec(ct, cor, 30)
+
+
+# In[ ]:
+
+
+
 
 
 # In[ ]:
@@ -2918,5 +3011,4 @@ def fill_lumen(wall_points, vessel_p, min_sp):
     ret = np.matmul(ret_coord, np.linalg.pinv(axes)) + cp
     
     return ret
-
 
