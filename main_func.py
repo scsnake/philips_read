@@ -3030,14 +3030,5 @@ def fill_lumen(wall_points, vessel_p, min_sp):
 # In[ ]:
 
 
-def ipynb2py():
-    os.system('rm -f main_func.py')
-    os.system('jupyter nbconvert --to script main_func.ipynb')
-    with open('main_func.py','r+') as f:
-        sc = f.read()
-        sc = sc.replace('','').replace('','').replace('','').replace('','')
-        sc = re.sub('        sc = sc.replace('','').replace('','')
-        f.seek(0)
-        f.write(sc)
-        f.truncate()
+
 
