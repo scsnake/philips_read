@@ -3,6 +3,7 @@
 # In[1]:
 
 
+# %run ../py_imports.ipynb
 from numba import jit, njit
 
 from time import time,sleep
@@ -32,7 +33,6 @@ from collections import OrderedDict, namedtuple
 import random
 import struct
 import inspect
-
 os.environ['MKL_NUM_THREADS'] = '16'
 np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
 
@@ -2074,7 +2074,7 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
     with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
         #         for z, (center_point, spl) in enumerate(zip(cor.center_points, cor.section_spl)):
         for z, vessel_p in enumerate(vessel_ps):
-#         for z, vessel_p in enumerate(vessel_ps[679:681]):
+#         for z, vessel_p in enumerate(vessel_ps[918:920]):
             #         plane = np.empty(new_dim)
 
             #         u0 = spl.intersect_u(cp, center_point[2])
@@ -2171,7 +2171,7 @@ def filling_from_corner(mask, z):
             bg = mask[k].copy()
             bg = np.ascontiguousarray(bg, dtype=np.uint8)
             for seed_i, seed_j in zip(i,j):
-                seed = tuple((seed_options[0][seed_i], seed_options[1][seed_j]))
+                seed = tuple((seed_options[0][seed_i], seed_options[1][seed_j]))[::-1]
                 try:
                     cv2.floodFill(bg, None, tuple(seed), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
                 except:
@@ -2237,7 +2237,7 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
 
     #     print(rel_coord)
         seed = np.floor(
-                center_ind+0.5).astype(np.int)
+                center_ind+0.5).astype(np.int)[::-1]
         seed_on_boundary = False
         for p in rel_coord:
             if np.all(seed==p):
@@ -2288,7 +2288,8 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
     
     ret[tuple(ret_coord.T)] = 1
     
-    
+#     if seed_on_boundary:
+#         print(z)
 #     plt.imshow(ret, cmap = 'gray')
     return (ret, not (cv_floodfill_error or seed_on_boundary))
 
