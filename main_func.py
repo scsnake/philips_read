@@ -1,3 +1,4 @@
+
 # coding: utf-8
 
 # In[1]:
@@ -5,6 +6,8 @@
 
 # %run ../py_imports.ipynb
 from numba import jit, njit
+
+ 
 
 from time import time,sleep
 from helper import ViewCT, CtVolume, groupedAvg
@@ -33,6 +36,16 @@ from collections import OrderedDict, namedtuple
 import random
 import struct
 import inspect
+# import sparse
+# from nbmultitask import ProcessWithLogAndControls
+
+
+
+
+
+
+
+# from interparc import interparc
 os.environ['MKL_NUM_THREADS'] = '16'
 np.set_printoptions(formatter={'float_kind': lambda x: "%.3f" % x})
 
@@ -2074,7 +2087,7 @@ def straighten_data_mask(ctVolume, cor, precision=(1, 1), show_range=(0.0, 1.0),
     with concurrent.futures.ProcessPoolExecutor(max_workers=30) as executor:
         #         for z, (center_point, spl) in enumerate(zip(cor.center_points, cor.section_spl)):
         for z, vessel_p in enumerate(vessel_ps):
-#         for z, vessel_p in enumerate(vessel_ps[918:920]):
+#         for z, vessel_p in enumerate(vessel_ps[679:683]):
             #         plane = np.empty(new_dim)
 
             #         u0 = spl.intersect_u(cp, center_point[2])
@@ -2237,7 +2250,7 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
 
     #     print(rel_coord)
         seed = np.floor(
-                center_ind+0.5).astype(np.int)[::-1]
+                center_ind+0.5).astype(np.int)
         seed_on_boundary = False
         for p in rel_coord:
             if np.all(seed==p):
@@ -2245,11 +2258,11 @@ def straighten_sub(vessel_p, spl, precision, output_spacing, center_ind, new_dim
                 break
                 
         
-        
-        try:
-            cv2.floodFill(arr, None, tuple(seed), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
-        except:
-            cv_floodfill_error=True
+        if not seed_on_boundary:
+            try:
+                cv2.floodFill(arr, None, tuple(seed[::-1]), 1, 0, 0, cv2.FLOODFILL_FIXED_RANGE)
+            except:
+                cv_floodfill_error=True
 #             pass
 #             closest_ds = np.amin(np.abs(rel_coord_copy - center_ind+origin))
 #             except:
@@ -3012,4 +3025,19 @@ def fill_lumen(wall_points, vessel_p, min_sp):
     ret = np.matmul(ret_coord, np.linalg.pinv(axes)) + cp
     
     return ret
+
+
+# In[ ]:
+
+
+def ipynb2py():
+    os.system('rm -f main_func.py')
+    os.system('jupyter nbconvert --to script main_func.ipynb')
+    with open('main_func.py','r+') as f:
+        sc = f.read()
+        sc = sc.replace('','').replace('','').replace('','').replace('','')
+        sc = re.sub('        sc = sc.replace('','').replace('','')
+        f.seek(0)
+        f.write(sc)
+        f.truncate()
 
