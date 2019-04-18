@@ -10,7 +10,6 @@ import sys
 import time
 import uuid
 
-import SimpleITK as sitk
 import matplotlib.pyplot as plt
 import numpy as np
 import pydicom as dicom
@@ -188,55 +187,56 @@ def nodule_segmentation(CtVolume, nodule_coord):
 
 class IndexTracker(object):
     def __init__(self, ax, X, window, **kwargs):
-#         ax.set_title('use scroll wheel to navigate images')
-        
+        #         ax.set_title('use scroll wheel to navigate images')
+
         if type(X) is not tuple:
-            X = (X, )
-            
+            X = (X,)
+
         try:
             ax = ax.ravel()
         except:
-            ax = (ax, )
-                
+            ax = (ax,)
+
         self.ax = ax
         self.X = X
         self.slices = np.array([im.shape[0] for im in X])
         self.ind = np.floor(self.slices / 2).astype(np.int)
-        
-        
+
         if 'cmap' not in kwargs:
-            kwargs['cmap']='gray'
+            kwargs['cmap'] = 'gray'
         if 'interpolation' not in kwargs:
             kwargs['interpolation'] = 'lanczos'
-#         if 'aspect' not in kwargs:
-#             kwargs['aspect'] = 'auto'
-            
+        #         if 'aspect' not in kwargs:
+        #             kwargs['aspect'] = 'auto'
+
         self.im = []
-        
-        if window is None or (len(window)==1 and type(window[0]) is not tuple):
+
+        if window is None or (len(window) == 1 and type(window[0]) is not tuple):
             self.window = np.repeat(window, len(X))
-        elif len(window)==2 and type(window[0]) is not tuple:
+        elif len(window) == 2 and type(window[0]) is not tuple:
             self.window = [window]
         else:
             self.window = window
-        
+
         for i, axx in enumerate(ax):
             w = self.window[i]
             if w is not None:
-                self.im.append(axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0]-w[1]/2, vmax=w[0]+w[1]/2, **kwargs))
-            elif np.amin(self.X[i])<0:
-                w = self.window[i] = (-600,1500) # lung window
-                self.im.append(axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0]-w[1]/2, vmax=w[0]+w[1]/2, **kwargs))
+                self.im.append(
+                    axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0] - w[1] / 2, vmax=w[0] + w[1] / 2, **kwargs))
+            elif np.amin(self.X[i]) < 0:
+                w = self.window[i] = (-600, 1500)  # lung window
+                self.im.append(
+                    axx.imshow(self.X[i][self.ind[i], ...], vmin=w[0] - w[1] / 2, vmax=w[0] + w[1] / 2, **kwargs))
             else:
                 self.im.append(axx.imshow(self.X[i][self.ind[i], ...], **kwargs))
-        
-        self.last_scroll=time.time()
+
+        self.last_scroll = time.time()
         self.update()
 
     def onscroll(self, event):
         this_time = time.time()
         if this_time - self.last_scroll < 0.1:
-            return 
+            return
         print("%s %s" % (event.button, event.step))
         if event.button == 'up':
             self.ind = np.mod((self.ind + 1), self.slices).astype(np.int)
@@ -253,30 +253,29 @@ class IndexTracker(object):
             im.axes.figure.canvas.draw()
 
 
-def ViewCT(arr, figsize=(8,8), window=None, subplots=None, **kwargs):
+def ViewCT(arr, figsize=(8, 8), window=None, subplots=None, **kwargs):
     global ax, fig, tracker
-    
+
     if subplots is None:
         if type(arr) is tuple:
             subplots = (len(arr), 1)
             arr = tuple(arr)
-        elif arr.ndim==4:
+        elif arr.ndim == 4:
             subplots = (arr.shape[0], 1)
-        elif arr.ndim==5:
+        elif arr.ndim == 5:
             subplots = arr.shape[0:2]
         else:
-            subplots = (1,1)
-            
-    
-    fig, ax = plt.subplots(subplots[0], subplots[1], figsize = figsize)
-    
-#     if not type(arr).__module__ == np.__name__:
-#         arr = arr.apply_window()
+            subplots = (1, 1)
+
+    fig, ax = plt.subplots(subplots[0], subplots[1], figsize=figsize)
+
+    #     if not type(arr).__module__ == np.__name__:
+    #         arr = arr.apply_window()
 
     tracker = IndexTracker(ax, arr, window=window, **kwargs)
 
     fig.canvas.mpl_connect('scroll_event', tracker.onscroll)
-#     fig.canvas.mpl_connect('button_press_event', tracker.onkeypress)
+    #     fig.canvas.mpl_connect('button_press_event', tracker.onkeypress)
     plt.show()
 
 
@@ -422,6 +421,8 @@ class CtVolume(object):
         return None
 
     def load_itk(self, filename):
+        import SimpleITK as sitk
+
         # Reads the image using SimpleITK
         itkimage = sitk.ReadImage(filename)
         self.id = os.path.splitext(os.path.basename(filename))[0]
@@ -436,17 +437,31 @@ class CtVolume(object):
         spacing = np.dot(spacing, direction).reshape(3)[::-1]
         return ct_scan, origin, spacing
 
+    def load_dicom_fn(self, path):
+        f = dicom.dcmread(path, force=True)
+        # f.file_meta.TransferSyntaxUID = dicom.uid.ImplicitVRLittleEndian
+        p = f.pixel_array
+        inst_no = int(f.InstanceNumber)
+        return inst_no, np.array(p), np.array(f[0x20, 0x32].value)[::-1]
+
+
     def load_dicom(self, dirname):
+        # try:
+        #     import concurrent.futures
+        #     parallel=True
+        # except:
+        #     parallel=False
+        parallel=False
+
 
         dcm_files = (glob.glob(os.path.join(dirname, '[!_]*.dcm')))
         if len(dcm_files) == 0:
             dcm_files = (glob.glob(os.path.join(dirname, '[!_]*')))
         assert len(dcm_files) > 0
-#         self.id = os.path.basename(dirname)
-        
-        f = dicom.read_file(dcm_files[0], stop_before_pixels=True)
-        
-        
+        #         self.id = os.path.basename(dirname)
+
+        f = dicom.dcmread(dcm_files[0], stop_before_pixels=True, force=True)
+
         self.id = f.SeriesInstanceUID
         try:
             rescale_s, rescale_i = f.RescaleSlope * 1.0, f.RescaleIntercept
@@ -455,55 +470,62 @@ class CtVolume(object):
         # p = f.pixel_array
 
         data = np.zeros((len(dcm_files), f.Columns, f.Rows), np.int16)
-        
+
         try:
             spacing = np.array([f.SliceThickness, f.PixelSpacing[1], f.PixelSpacing[0]])
 
-
             spacing = np.dot(spacing[::-1].reshape((1, 3)),
                              np.append(np.array(f.ImageOrientationPatient), [0, 0, 1]).reshape((3, 3))).reshape(3)[::-1]
-            
-            if f[0x18, 0x5100][0:2]=='FF': # image position == feet first
+
+            if f[0x18, 0x5100][0:2] == 'FF':  # image position == feet first
                 spacing[0] = -spacing[0]
         except:
-            spacing = np.array([1,1,1])
-        
-        
-        
+            spacing = np.array([1, 1, 1])
+
         tmp = {}
         origins = {}
-        all_inst_no =[]
-        for path in dcm_files:
-            try:
-                f = dicom.read_file(path)
+        all_inst_no = []
 
-                p = f.pixel_array
-                inst_no = int(f.InstanceNumber)
-                all_inst_no.append(inst_no)
-    #             data[inst_no - 1] = np.array(p)
-                tmp[inst_no] = np.array(p)
-                origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]   # image position
-            except:
-                pass
-        
+
+        if parallel:
+            with concurrent.futures.ThreadPoolExecutor(8) as executor:
+                result = [executor.submit(self.load_dicom_fn, path) for path in dcm_files]
+                for future in concurrent.futures.as_completed(result):
+                    if future.done():
+                        inst_no, p, origin = future.result()
+                        all_inst_no.append(inst_no)
+                        tmp[inst_no]= p
+                        origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]
+
+        else:
+            for path in dcm_files:
+                try:
+                    inst_no, p, origin = self.load_dicom_fn(path)
+                    all_inst_no.append(inst_no)
+                    #             data[inst_no - 1] = np.array(p)
+                    tmp[inst_no] = np.array(p)
+                    origins[inst_no] = np.array(f[0x20, 0x32].value)[::-1]  # image position
+                except:
+                    pass
+
         for i, inst_no in enumerate(sorted(all_inst_no)):
-            data[i,...] = tmp[inst_no]
-        
-            if i==0:
+            data[i, ...] = tmp[inst_no]
+
+            if i == 0:
                 try:
                     origin = origins[inst_no]
                 except:
-                    origin = np.array([0,0,0])
-        
+                    origin = np.array([0, 0, 0])
+
         del tmp
-        
-        data = data.astype(np.float64)
-        if rescale_s!=1:
-            data*=rescale_s
-        if rescale_i!=0:
-            data+=rescale_i
+
+        data = data.astype(np.float32)
+        if rescale_s != 1:
+            data *= rescale_s
+        if rescale_i != 0:
+            data += rescale_i
         data = np.maximum(data, -2000, data)
-        
+
         return data.astype(np.int16), origin, spacing
 
         # self.gray = self.apply_window(self.data)
@@ -523,13 +545,17 @@ class CtVolume(object):
 
     def apply_window(self, data=None, window=None):
         if data is None:
-            data = np.copy(self.data)
+            ret = np.copy(self.data).astype(np.float32)
+        else:
+            ret = data.astype(np.float32)
 
         wl, ww = self.window if window is None else window
-
-        data[data < wl - ww] = wl - ww
-        data[data >= wl + ww] = wl + ww - 1
-        return ((data - (wl - ww)) * 256.0 / (2 * ww)).astype(np.uint32)
+        ret -= (wl-ww)
+        ret /= (2*ww/256.0)
+        np.clip(ret, 0, 255, ret)
+        # data[data < wl - ww] = wl - ww
+        # data[data >= wl + ww] = wl + ww - 1
+        return ret.astype(np.uint8)
 
     def crop(self, volume, center_pixel_coord, shape, padding):
         if type(shape) is int:
@@ -639,21 +665,21 @@ class CtVolume(object):
 
 def groupedAvg(arr, N=2, axis=0):
     ndim = arr.ndim
-    axes = np.arange(1,2*ndim,2)
+    axes = np.arange(1, 2 * ndim, 2)
     new_shape = np.array((arr.shape, np.ones(ndim))).T.ravel().astype(np.int)
 
-    for i,n in zip(axis,N):
-        if n!=1:
-            new_shape[i*2] //= n
-            new_shape[i*2+1] = n
-            
+    for i, n in zip(axis, N):
+        if n != 1:
+            new_shape[i * 2] //= n
+            new_shape[i * 2 + 1] = n
+
     return arr.reshape(tuple(new_shape)).mean(axis=tuple(axes))
-    
+
     ## https://stackoverflow.com/questions/30379311/fast-way-to-take-average-of-every-n-rows-in-a-npy-array
     if type(N) is int or np.mod(N, 1) == 0:
         N = int(N)
         slc = [slice(None)] * len(arr.shape)
-        slc[axis]=slice(N-1, None, N)
+        slc[axis] = slice(N - 1, None, N)
 
         slc1 = [slice(None)] * len(arr.shape)
         slc1[axis] = slice(1, None, None)
